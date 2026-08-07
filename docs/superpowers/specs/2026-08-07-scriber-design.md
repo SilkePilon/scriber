@@ -21,10 +21,13 @@ Scriber never talks to a network. There is no account, no sync, no telemetry.
 
 ### Naming
 
-The app is `Scriber`. Crates are namespaced `scriber-*`. The Flathub application ID is
-`io.github.<owner>.Scriber` (owner to be fixed before first publish). The repository
+The app is `Scriber`. Crates are namespaced `scriber-*`. The application ID is
+`io.github.<owner>.Scriber` (owner to be fixed before first release). The repository
 directory is currently named `Open3D`, which collides with the established Open3D
-library (open3d.org); rename it to `Scriber` before publishing anything.
+library (open3d.org); rename it to `Scriber` at the owner's convenience.
+
+Scriber is **not** distributed through Flathub. See Section 12 for the self-hosted
+Flatpak repository.
 
 ### Trade dress
 
@@ -86,7 +89,7 @@ cover them.
 | Entity references | Persistent ID with geometric-query fallback and a repair UI | Opaque IDs alone would destroy diffability; queries alone silently match the wrong entity after an edit. The hybrid keeps the script readable and survives upstream changes. |
 | Viewport | `GtkGLArea` with OpenGL via `glow` | The supported path; GTK4's own renderer is GL. GTK4 has no wgpu widget (gtk4-rs#1278) and the offscreen-texture route is unproven. Renderer sits behind a trait so wgpu can replace it later. |
 | Input | Mouse and keyboard first; touch and pen supported | Hover previews, right-click context, numeric entry, scroll zoom. GTK4 gesture controllers drive the same state machines for touch and stylus, but do not shape the layout. |
-| Distribution | Flatpak | Standard for GNOME; bundles the OpenCascade dependency cleanly. |
+| Distribution | Flatpak from a self-hosted, signed repository | Flatpak is standard for GNOME and bundles the OpenCascade dependency cleanly. Flathub is not used; the project publishes its own OSTree repository on GitHub Pages and users add it as a remote. See Section 12. |
 
 ---
 
@@ -365,7 +368,7 @@ Each milestone is independently shippable and testable.
 
 | M | Deliverable |
 | --- | --- |
-| 0 | Workspace skeleton, Flatpak manifest, CI. `opencascade-rs` linking proven with a box-minus-cylinder boolean. |
+| 0 | Workspace skeleton, Flatpak manifest, self-hosted repo publishing pipeline, CI. `opencascade-rs` linking proven with a box-minus-cylinder boolean. |
 | 1 | `scriber-lang` + `scriber-doc` + `scriber-cli`. Headless: document in, STEP and STL out. No GUI. |
 | 2 | GTK4 shell, `GtkGLArea` viewport, tessellation, ID-buffer picking, camera, view cube. |
 | 3 | `scriber-solver`, sketcher UI, auto-constrain, fully-defined indicator. |
@@ -391,3 +394,72 @@ usable. Milestone 4 is the first point at which it is recognisably a CAD applica
 | Lossless round-trip constrains DSL design permanently | Establish the property test in M1, before any GUI depends on the printer. |
 | GTK4 has no wgpu path | Ship on `GtkGLArea` and OpenGL, renderer behind a trait. Revisit only if GTK upstream resolves it. |
 | Scope is very large | Milestones are ordered so each one is independently useful. Section 2.3 is enforced, not aspirational. |
+| Self-hosting distribution means no Flathub discovery, and users must trust a third-party remote | Sign the repository with GPG and publish the fingerprint in the README. Ship a `.flatpakref` so adding the remote is one click, and a standalone bundle for users who prefer not to add a remote at all. Reproducible manifest so anyone can rebuild and compare. |
+
+---
+
+## 12. Distribution
+
+Scriber is not published to Flathub. It ships from a Flatpak repository the project
+hosts itself, which users add as a remote.
+
+### 12.1 Repository
+
+The build produces an OSTree repository published as static files on GitHub Pages at
+`https://<owner>.github.io/scriber/`:
+
+```
+scriber/
+  repo/                     OSTree repository (the actual Flatpak remote)
+  scriber.flatpakrepo       remote definition — URL, GPG key, title, description
+  scriber.flatpakref        one-click install reference for the app
+  scriber.gpg               exported public signing key
+```
+
+The repository is GPG-signed. The public key fingerprint is published in the README so
+users can verify what they are trusting before adding the remote.
+
+### 12.2 Install instructions for the README
+
+Primary path — add the remote once, then install and receive updates through
+`flatpak update` like any other application:
+
+```sh
+flatpak remote-add --if-not-exists scriber \
+  https://<owner>.github.io/scriber/scriber.flatpakrepo
+
+flatpak install scriber io.github.<owner>.Scriber
+```
+
+One-click alternative — the `.flatpakref` adds the remote and installs in a single step,
+and is what the download button on the project page points at:
+
+```sh
+flatpak install https://<owner>.github.io/scriber/scriber.flatpakref
+```
+
+Fallback for users who would rather not add a remote — a self-contained bundle attached
+to each GitHub release. This installs a fixed version and does **not** receive automatic
+updates:
+
+```sh
+flatpak install --bundle Scriber-<version>-x86_64.flatpak
+```
+
+Building from source is documented separately in the README for contributors; it is not
+the recommended install path.
+
+### 12.3 Release pipeline
+
+A GitHub Actions workflow on tag:
+
+1. `flatpak-builder` builds the manifest for `x86_64` and `aarch64`.
+2. `flatpak build-export` writes the build into `repo/`, GPG-signed.
+3. `flatpak build-update-repo --generate-static-deltas --prune` updates repository
+   metadata and keeps download sizes small.
+4. `flatpak build-bundle` produces the standalone `.flatpak` for the release page.
+5. `repo/` and the `.flatpakrepo` / `.flatpakref` / `.gpg` files are published to the
+   GitHub Pages branch.
+
+The signing key lives in Actions secrets. The manifest pins every dependency to a commit
+or tarball hash so a build is reproducible and independently verifiable.
