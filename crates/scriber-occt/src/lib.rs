@@ -103,7 +103,10 @@ mod tests {
     #[test]
     fn write_step_produces_a_valid_header() {
         let shape = ffi::make_box(1.0, 1.0, 1.0).expect("box builds");
-        let path = std::env::temp_dir().join("scriber_occt_write_step.step");
+        let path = std::env::temp_dir().join(format!(
+            "scriber_occt_write_step_{}.step",
+            std::process::id()
+        ));
         let path_str = path.to_str().expect("temp path is valid UTF-8");
 
         // A leftover file from an earlier run would satisfy both assertions
@@ -128,10 +131,10 @@ mod tests {
     }
 
     #[test]
-    fn unwritable_step_path_reports_the_path_and_status() {
+    fn unwritable_step_path_reports_the_status() {
         // Scope note: this is NOT an abort-prevention test. OCCT's STEP writer
         // never lets a Standard_Failure escape Transfer() or Write() -- it
-        // catches the raise itself and reports IFSelect_RetStop (4), whose own
+        // catches the raise itself and reports IFSelect_RetStop, whose own
         // header glosses it as "indicates end or stop (such as Raise)". Every
         // failure reachable through this bridge lands there (missing parent, a
         // directory, an empty path, /dev/full, a read-only mount, a symlink
@@ -144,19 +147,16 @@ mod tests {
         //
         // What this pins is the message: OCCT reports the useful detail to its
         // messenger rather than through the exception, so the shim has to fold
-        // the path and status in itself. Task 5's Error::StepWriteFailed
-        // { path, reason } has nothing else to work from.
+        // the status in itself. Task 5's Error::StepWriteFailed { path, reason }
+        // gets the path from Rust, which already has it; the shim deliberately
+        // leaves it out of the message to avoid printing it twice.
         let shape = ffi::make_box(1.0, 1.0, 1.0).expect("box builds");
         let error = ffi::write_step(&shape, "/nonexistent-directory-scriber/model.step")
             .expect_err("expected a write into a missing directory to be rejected");
 
         let message = error.what();
         assert!(
-            message.contains("/nonexistent-directory-scriber/model.step"),
-            "expected the failing path in the message, got: {message}"
-        );
-        assert!(
-            message.contains("status 4"),
+            message.contains("IFSelect_RetStop"),
             "expected the IFSelect_RetStop status in the message, got: {message}"
         );
     }

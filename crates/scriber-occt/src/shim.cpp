@@ -6,9 +6,6 @@
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
-#include <Message.hxx>
-#include <Message_Messenger.hxx>
-#include <Message_PrinterOStream.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <STEPControl_Writer.hxx>
 
@@ -16,8 +13,32 @@
 
 namespace scriber {
 
+namespace {
+
+// Symbolic name for the status, so the message does not depend on an integer
+// whose meaning a reader would have to go look up.
+const char *status_name(IFSelect_ReturnStatus status) {
+  switch (status) {
+    case IFSelect_RetVoid:
+      return "IFSelect_RetVoid";
+    case IFSelect_RetDone:
+      return "IFSelect_RetDone";
+    case IFSelect_RetError:
+      return "IFSelect_RetError";
+    case IFSelect_RetFail:
+      return "IFSelect_RetFail";
+    case IFSelect_RetStop:
+      return "IFSelect_RetStop";
+  }
+
+  return "IFSelect_Ret<unknown>";
+}
+
+}  // namespace
+
 std::unique_ptr<Shape> make_box(double dx, double dy, double dz) {
   return guard([&] {
+    silence_kernel_console();
     BRepPrimAPI_MakeBox builder(dx, dy, dz);
     return std::make_unique<Shape>(Shape{builder.Shape()});
   });
@@ -25,6 +46,7 @@ std::unique_ptr<Shape> make_box(double dx, double dy, double dz) {
 
 std::unique_ptr<Shape> make_cylinder(double radius, double height) {
   return guard([&] {
+    silence_kernel_console();
     BRepPrimAPI_MakeCylinder builder(radius, height);
     return std::make_unique<Shape>(Shape{builder.Shape()});
   });
@@ -32,6 +54,7 @@ std::unique_ptr<Shape> make_cylinder(double radius, double height) {
 
 std::unique_ptr<Shape> cut(const Shape &target, const Shape &tool) {
   return guard([&] {
+    silence_kernel_console();
     // The constructor already runs the operation. Calling Build() again would
     // clear and re-run the whole DS filler, doubling the cost of every cut.
     BRepAlgoAPI_Cut op(target.inner, tool.inner);
@@ -49,27 +72,12 @@ std::unique_ptr<Shape> cut(const Shape &target, const Shape &tool) {
 
 double volume(const Shape &shape) {
   return guard([&] {
+    silence_kernel_console();
     GProp_GProps props;
     BRepGProp::VolumeProperties(shape.inner, props);
     return props.Mass();
   });
 }
-
-namespace {
-
-// OCCT's default messenger prints a "Statistics on Transfer" banner to stdout
-// on every write. A CAD application owns its own stdout, so drop the console
-// printers once, the first time we touch the data-exchange layer.
-void silence_kernel_console() {
-  static const bool done = [] {
-    Message::DefaultMessenger()->RemovePrinters(
-        STANDARD_TYPE(Message_PrinterOStream));
-    return true;
-  }();
-  (void)done;
-}
-
-}  // namespace
 
 void write_step(const Shape &shape, rust::Str path) {
   guard([&] {
@@ -78,13 +86,14 @@ void write_step(const Shape &shape, rust::Str path) {
     STEPControl_Writer writer;
 
     // OCCT reports the useful detail to its messenger, not through the
-    // exception, so fold the status code and path into the message we throw.
-    // It is all Task 5 has to put in Error::StepWriteFailed { reason }.
+    // exception, so fold the status code into the message we throw. The path
+    // is deliberately excluded: Rust already knows it, and a later task would
+    // otherwise print it twice.
     const IFSelect_ReturnStatus transferred =
         writer.Transfer(shape.inner, STEPControl_AsIs);
     if (transferred != IFSelect_RetDone) {
-      throw std::runtime_error("STEP transfer failed with status " +
-                               std::to_string(static_cast<int>(transferred)));
+      throw std::runtime_error(std::string("STEP transfer failed (") +
+                               status_name(transferred) + ")");
     }
 
     // rust::Str is not null-terminated, so copy before handing to OCCT.
@@ -92,9 +101,8 @@ void write_step(const Shape &shape, rust::Str path) {
 
     const IFSelect_ReturnStatus written = writer.Write(target.c_str());
     if (written != IFSelect_RetDone) {
-      throw std::runtime_error("STEP write to '" + target +
-                               "' failed with status " +
-                               std::to_string(static_cast<int>(written)));
+      throw std::runtime_error(std::string("STEP write failed (") +
+                               status_name(written) + ")");
     }
   });
 }

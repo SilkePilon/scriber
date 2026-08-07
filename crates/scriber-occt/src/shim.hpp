@@ -5,6 +5,9 @@
 #include <string>
 #include <utility>
 
+#include <Message.hxx>
+#include <Message_Messenger.hxx>
+#include <Message_PrinterOStream.hxx>
 #include <Standard_Failure.hxx>
 #include <Standard_Type.hxx>
 #include <TopoDS_Shape.hxx>
@@ -18,6 +21,18 @@ namespace scriber {
 struct Shape {
   TopoDS_Shape inner;
 };
+
+// Drops OCCT's console printers the first time any shim function runs, so
+// kernel diagnostics never land on stdout. The function-local static makes
+// this thread-safe and once-only under C++11 and later.
+inline void silence_kernel_console() {
+  static const bool done = [] {
+    Message::DefaultMessenger()->RemovePrinters(
+        STANDARD_TYPE(Message_PrinterOStream));
+    return true;
+  }();
+  (void)done;
+}
 
 // OCCT signals failure by raising Standard_Failure, which derives from
 // Standard_Transient and NOT from std::exception. cxx's generated catch
