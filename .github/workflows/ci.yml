@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# This job fetches and executes a third-party script, so it gets no more than
+# the read access it needs.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,7 +20,7 @@ jobs:
       - name: Install build dependencies
         run: dnf install -y opencascade-devel cmake gcc-c++ git python3 python3-pip
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -43,7 +48,9 @@ jobs:
         run: |
           python3 -m venv /tmp/cargo-sources-venv
           /tmp/cargo-sources-venv/bin/pip install --quiet aiohttp toml tomlkit
-          python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py', '/tmp/flatpak-cargo-generator.py')"
+          # Pinned to a commit: this script is downloaded and executed, so a
+          # mutable branch ref would let upstream change what runs here.
+          python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/737c0085912f9f7dabf9341d4608e2a77a51a73a/cargo/flatpak-cargo-generator.py', '/tmp/flatpak-cargo-generator.py')"
           /tmp/cargo-sources-venv/bin/python /tmp/flatpak-cargo-generator.py \
             Cargo.lock -o /tmp/cargo-sources.json
           if ! diff -u build-aux/cargo-sources.json /tmp/cargo-sources.json; then

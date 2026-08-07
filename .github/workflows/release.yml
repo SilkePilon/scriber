@@ -6,8 +6,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 jobs:
   build:
@@ -19,7 +17,7 @@ jobs:
       - name: Install the flatpak toolchain
         run: dnf install -y flatpak flatpak-builder git ostree
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Add flathub and install the runtime
         run: |
@@ -36,30 +34,65 @@ jobs:
 
       - name: Fetch the existing repository
         # Keeps history so users receive deltas rather than full redownloads.
+        # The branch is probed explicitly rather than falling back on any clone
+        # failure: a transient network or auth error must abort the job, because
+        # the later force-push would otherwise replace gh-pages with a
+        # one-commit repo and destroy every published release's ostree objects.
         run: |
-          git clone --branch gh-pages --depth 1 \
-            "https://github.com/${GITHUB_REPOSITORY}.git" pages || mkdir -p pages
+          set -euo pipefail
+          REMOTE="https://github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "$REMOTE" gh-pages >/dev/null 2>&1; then
+            git clone --branch gh-pages --depth 1 "$REMOTE" pages
+          else
+            echo "gh-pages does not exist yet — first release"
+            mkdir -p pages
+          fi
 
       - name: Build
+        env:
+          GPG_KEYID: ${{ secrets.FLATPAK_GPG_KEYID }}
         run: |
           flatpak-builder --force-clean --disable-rofiles-fuse \
             --repo=pages/repo \
-            --gpg-sign=${{ secrets.FLATPAK_GPG_KEYID }} \
+            --gpg-sign="$GPG_KEYID" \
             build-dir build-aux/io.github.SilkePilon.Scriber.yaml
 
+      - name: Assert OCCT is dynamically linked in the shipped binary
+        # CI checks the host build, which links Fedora's system OCCT and so can
+        # never regress. This is the artifact users actually receive, and the
+        # one whose linkage the manifest controls. libTK* resolving to "not
+        # found" on the host is expected — the DT_NEEDED entries are the proof.
+        run: ./scripts/check-dynamic-occt.sh build-dir/files/bin/scriber
+
+      - name: Run the shipped binary
+        # Nothing else between the build and the upload executes the artifact.
+        # CYLINDRICAL_SURFACE proves the boolean actually ran, rather than an
+        # uncut block having been exported.
+        run: |
+          set -euo pipefail
+          flatpak-builder --run build-dir \
+            build-aux/io.github.SilkePilon.Scriber.yaml \
+            scriber smoke --output /tmp/release-check.step
+          head -c 13 /tmp/release-check.step | grep -q 'ISO-10303-21;'
+          grep -q 'CYLINDRICAL_SURFACE' /tmp/release-check.step
+
       - name: Update repository metadata and generate deltas
+        env:
+          GPG_KEYID: ${{ secrets.FLATPAK_GPG_KEYID }}
         run: |
           flatpak build-update-repo \
             --generate-static-deltas --prune \
-            --gpg-sign=${{ secrets.FLATPAK_GPG_KEYID }} \
+            --gpg-sign="$GPG_KEYID" \
             pages/repo
 
       - name: Build the standalone bundle
+        env:
+          GPG_KEYID: ${{ secrets.FLATPAK_GPG_KEYID }}
         run: |
           flatpak build-bundle pages/repo \
             "Scriber-${GITHUB_REF_NAME}-x86_64.flatpak" \
             io.github.SilkePilon.Scriber \
-            --gpg-sign=${{ secrets.FLATPAK_GPG_KEYID }}
+            --gpg-sign="$GPG_KEYID"
 
       - name: Write the remote definitions
         run: |
@@ -88,6 +121,8 @@ jobs:
           EOF
 
       - name: Publish to Pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd pages
           git init -b gh-pages 2>/dev/null || true
@@ -96,10 +131,10 @@ jobs:
           git add -A
           git commit -m "release ${GITHUB_REF_NAME}"
           git push --force \
-            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             gh-pages
 
       - name: Attach the bundle to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: Scriber-*.flatpak

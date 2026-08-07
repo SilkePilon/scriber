@@ -2,7 +2,8 @@ use std::process::Command;
 
 #[test]
 fn smoke_command_writes_a_step_file() {
-    let output_path = std::env::temp_dir().join("scriber_cli_smoke.step");
+    let output_path =
+        std::env::temp_dir().join(format!("scriber_cli_smoke_{}.step", std::process::id()));
     std::fs::remove_file(&output_path).ok();
 
     let output = Command::new(env!("CARGO_BIN_EXE_scriber"))
@@ -20,6 +21,13 @@ fn smoke_command_writes_a_step_file() {
 
     let contents = std::fs::read_to_string(&output_path).expect("STEP file written");
     assert!(contents.starts_with("ISO-10303-21;"));
+    // Read the geometry back out of the file rather than trusting the printed
+    // volume, which comes from an in-process query. The cylindrical face only
+    // exists if the cut actually landed in what was exported.
+    assert!(
+        contents.contains("CYLINDRICAL_SURFACE"),
+        "exported solid has no cylindrical face, so the cut was not written"
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Pin the value, not just the label: a boolean that silently did nothing
