@@ -268,12 +268,13 @@ Create `crates/scriber-occt/src/shim.hpp`:
 #pragma once
 
 #include <memory>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 #include <Standard_Failure.hxx>
+#include <Standard_Type.hxx>
+#include <Standard_Version.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include "rust/cxx.h"
@@ -298,18 +299,28 @@ auto guard(Body &&body) -> decltype(body()) {
   try {
     return std::forward<Body>(body)();
   } catch (const Standard_Failure &failure) {
-    // Print() writes "ExceptionClass: message" and is the only accessor that
-    // exists in both OCCT 7.x and 8.x. Do not reach for the alternatives:
-    // DynamicType() exists only in 7.x (8.0 dropped Standard_Transient as the
-    // base and derives Standard_Failure from std::exception instead), and
-    // ExceptionType() exists only in 8.x. We develop on 7.9.3 and ship 8.0.1,
-    // so anything version-specific compiles here and breaks in the Flatpak.
-    std::ostringstream stream;
-    failure.Print(stream);
+    // The accessor for the exception's class name moved between OCCT
+    // generations, and we develop on 7.9.3 while shipping 8.0.1 — so both
+    // branches have to compile. 7.x carries RTTI from its Standard_Transient
+    // base; 8.0 dropped that base (Standard_Failure now derives from
+    // std::exception) and exposes ExceptionType() instead. Print() does exist
+    // in both, but it prefixes a raw pointer address, which has no place in a
+    // message a user reads.
+#if OCC_VERSION_MAJOR >= 8
+    const char *kind = failure.ExceptionType();
+#else
+    const char *kind = failure.DynamicType()->Name();
+#endif
+    std::string text =
+        (kind != nullptr && *kind != '\0') ? kind : "Standard_Failure";
 
-    const std::string text = stream.str();
-    throw std::runtime_error(text.empty() ? "OpenCASCADE operation failed"
-                                          : text);
+    const char *message = failure.GetMessageString();
+    if (message != nullptr && *message != '\0') {
+      text += ": ";
+      text += message;
+    }
+
+    throw std::runtime_error(text);
   } catch (const std::exception &) {
     // Shim functions throw std::runtime_error themselves for non-raising
     // failures (a boolean that reports IsDone() == false, for example).
