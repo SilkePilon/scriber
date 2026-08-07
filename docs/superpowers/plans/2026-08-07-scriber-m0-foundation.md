@@ -696,6 +696,9 @@ In `crates/scriber-occt/src/shim.cpp`, add these includes:
 
 ```cpp
 #include <IFSelect_ReturnStatus.hxx>
+#include <Message.hxx>
+#include <Message_Messenger.hxx>
+#include <Message_PrinterOStream.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <STEPControl_Writer.hxx>
 
@@ -705,19 +708,46 @@ In `crates/scriber-occt/src/shim.cpp`, add these includes:
 And this function inside `namespace scriber`:
 
 ```cpp
+namespace {
+
+// OCCT's default messenger prints a "Statistics on Transfer" banner to stdout
+// on every write. A CAD application owns its own stdout, so drop the console
+// printers once, the first time we touch the data-exchange layer.
+void silence_kernel_console() {
+  static const bool done = [] {
+    Message::DefaultMessenger()->RemovePrinters(
+        STANDARD_TYPE(Message_PrinterOStream));
+    return true;
+  }();
+  (void)done;
+}
+
+}  // namespace
+
 void write_step(const Shape &shape, rust::Str path) {
   guard([&] {
+    silence_kernel_console();
+
     STEPControl_Writer writer;
 
-    if (writer.Transfer(shape.inner, STEPControl_AsIs) != IFSelect_RetDone) {
-      throw std::runtime_error("STEP transfer failed");
+    // OCCT reports the useful detail to its messenger, not through the
+    // exception, so fold the status code and path into the message we throw.
+    // It is all Task 5 has to put in Error::StepWriteFailed { reason }.
+    const IFSelect_ReturnStatus transferred =
+        writer.Transfer(shape.inner, STEPControl_AsIs);
+    if (transferred != IFSelect_RetDone) {
+      throw std::runtime_error("STEP transfer failed with status " +
+                               std::to_string(static_cast<int>(transferred)));
     }
 
     // rust::Str is not null-terminated, so copy before handing to OCCT.
     const std::string target(path.data(), path.size());
 
-    if (writer.Write(target.c_str()) != IFSelect_RetDone) {
-      throw std::runtime_error("STEP write failed");
+    const IFSelect_ReturnStatus written = writer.Write(target.c_str());
+    if (written != IFSelect_RetDone) {
+      throw std::runtime_error("STEP write to '" + target +
+                               "' failed with status " +
+                               std::to_string(static_cast<int>(written)));
     }
   });
 }
