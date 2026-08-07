@@ -595,13 +595,17 @@ std::unique_ptr<Shape> make_cylinder(double radius, double height) {
 
 std::unique_ptr<Shape> cut(const Shape &target, const Shape &tool) {
   return guard([&] {
+    // The constructor already runs the operation. Calling Build() again would
+    // clear and re-run the whole DS filler, doubling the cost of every cut.
     BRepAlgoAPI_Cut op(target.inner, tool.inner);
-    op.Build();
 
     if (!op.IsDone()) {
       throw std::runtime_error("boolean cut failed");
     }
 
+    // IsDone() only means the algorithm ran; subtracting a larger solid
+    // succeeds and yields an empty compound. Detecting that is the kernel
+    // layer's job (Error::EmptyResult), not the bridge's.
     return std::make_unique<Shape>(Shape{op.Shape()});
   });
 }
@@ -824,8 +828,9 @@ mod tests {
         for (radius, height, expected) in
             [(-1.0, 10.0, "radius"), (0.0, 10.0, "radius"), (1.0, f64::NAN, "height")]
         {
-            let err = Solid::cylinder(radius, height)
-                .expect_err("must be rejected: r={radius} h={height}");
+            let Err(err) = Solid::cylinder(radius, height) else {
+                panic!("must be rejected: r={radius} h={height}");
+            };
             assert!(
                 matches!(err, Error::InvalidDimension { name, .. } if name == expected),
                 "got {err:?}"
