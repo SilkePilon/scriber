@@ -311,6 +311,11 @@ auto guard(Body &&body) -> decltype(body()) {
     }
 
     throw std::runtime_error(text);
+  } catch (...) {
+    // OCCT's hierarchy is rooted at Standard_Failure and cxx already handles
+    // std::exception, so reaching here should be impossible. Catching anyway
+    // costs nothing and keeps a stray throw from aborting the process.
+    throw std::runtime_error("unknown C++ exception from OpenCASCADE");
   }
 }
 
@@ -402,8 +407,16 @@ mod tests {
     fn degenerate_box_is_an_error_not_a_crash() {
         // OCCT raises Standard_DomainError here. If the shim's guard were
         // missing, this would abort the test process instead of returning Err.
-        let result = ffi::make_box(0.0, 1.0, 1.0);
-        assert!(result.is_err(), "expected a zero-width box to be rejected");
+        let error = ffi::make_box(0.0, 1.0, 1.0)
+            .err()
+            .expect("expected a zero-width box to be rejected");
+
+        // Pin the class name too, so a regression to a generic message is caught.
+        assert!(
+            error.what().contains("Standard_DomainError"),
+            "expected the OCCT exception class in the message, got: {}",
+            error.what()
+        );
     }
 }
 ```
@@ -697,11 +710,12 @@ void write_step(const Shape &shape, rust::Str path) {
     if (writer.Write(target.c_str()) != IFSelect_RetDone) {
       throw std::runtime_error("STEP write failed");
     }
-
-    return 0;  // guard() deduces its return type from the body
   });
 }
 ```
+
+`guard()` deduces a `void` return here, which is well-formed — do not add a
+dummy return value.
 
 - [ ] **Step 5: Declare it in the bridge**
 
@@ -837,8 +851,8 @@ pub enum Error {
     Kernel(String),
 
     /// OCCT declined to write the STEP file.
-    #[error("failed to write STEP file to {path}")]
-    StepWriteFailed { path: PathBuf },
+    #[error("failed to write STEP file to {path}: {reason}")]
+    StepWriteFailed { path: PathBuf, reason: String },
 
     /// A boolean operation produced no geometry.
     #[error("operation produced an empty result")]
@@ -914,10 +928,14 @@ impl Solid {
         let path = path.as_ref();
         let as_str = path.to_str().ok_or_else(|| Error::StepWriteFailed {
             path: path.to_path_buf(),
+            reason: "path is not valid UTF-8".to_owned(),
         })?;
 
-        ffi::write_step(&self.inner, as_str)
-            .map_err(|_| Error::StepWriteFailed { path: path.to_path_buf() })
+        // Keep OCCT's own message — it is the only clue about why a write failed.
+        ffi::write_step(&self.inner, as_str).map_err(|exception| Error::StepWriteFailed {
+            path: path.to_path_buf(),
+            reason: exception.what().to_owned(),
+        })
     }
 }
 
