@@ -311,6 +311,11 @@ auto guard(Body &&body) -> decltype(body()) {
     }
 
     throw std::runtime_error(text);
+  } catch (const std::exception &) {
+    // Shim functions throw std::runtime_error themselves for non-raising
+    // failures (a boolean that reports IsDone() == false, for example).
+    // Rethrow untouched so the specific message survives; cxx converts it.
+    throw;
   } catch (...) {
     // OCCT's hierarchy is rooted at Standard_Failure and cxx already handles
     // std::exception, so reaching here should be impossible. Catching anyway
@@ -804,9 +809,28 @@ mod tests {
     }
 
     #[test]
-    fn degenerate_cuboid_is_a_kernel_error() {
+    fn degenerate_cuboid_is_rejected() {
         let err = Solid::cuboid(0.0, 1.0, 1.0).expect_err("must be rejected");
-        assert!(matches!(err, Error::Kernel(_)), "got {err:?}");
+        assert!(
+            matches!(err, Error::InvalidDimension { name: "dx", .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn negative_and_nan_cylinder_dimensions_are_rejected() {
+        // OCCT accepts a zero radius and defers a negative height to a later
+        // volume query, so these must be caught here rather than in the kernel.
+        for (radius, height, expected) in
+            [(-1.0, 10.0, "radius"), (0.0, 10.0, "radius"), (1.0, f64::NAN, "height")]
+        {
+            let err = Solid::cylinder(radius, height)
+                .expect_err("must be rejected: r={radius} h={height}");
+            assert!(
+                matches!(err, Error::InvalidDimension { name, .. } if name == expected),
+                "got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -846,6 +870,14 @@ use std::path::PathBuf;
 /// Errors produced by geometry operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// A dimension was not a finite positive number.
+    ///
+    /// OCCT does not reliably reject these — `make_cylinder(0.0, 1.0)` returns
+    /// a valid-looking shape of zero volume, and a negative height only fails
+    /// later during a volume query. We validate at the boundary instead.
+    #[error("{name} must be a finite positive number, got {value}")]
+    InvalidDimension { name: &'static str, value: f64 },
+
     /// OCCT raised a failure. Carries the kernel's own message.
     #[error("geometry kernel error: {0}")]
     Kernel(String),
@@ -899,11 +931,18 @@ impl Solid {
 
     /// An axis-aligned box with one corner at the origin.
     pub fn cuboid(dx: f64, dy: f64, dz: f64) -> Result<Self, Error> {
+        check_extent("dx", dx)?;
+        check_extent("dy", dy)?;
+        check_extent("dz", dz)?;
+
         Ok(Self::from_raw(ffi::make_box(dx, dy, dz)?))
     }
 
     /// A cylinder whose axis runs along +Z with its base at the origin.
     pub fn cylinder(radius: f64, height: f64) -> Result<Self, Error> {
+        check_extent("radius", radius)?;
+        check_extent("height", height)?;
+
         Ok(Self::from_raw(ffi::make_cylinder(radius, height)?))
     }
 
@@ -939,6 +978,15 @@ impl Solid {
     }
 }
 
+/// Rejects dimensions OCCT would accept but should not.
+fn check_extent(name: &'static str, value: f64) -> Result<(), Error> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(Error::InvalidDimension { name, value });
+    }
+
+    Ok(())
+}
+
 /// Returns the crate's semantic version, used to stamp exported files.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -950,7 +998,7 @@ Add `cxx.workspace = true` to `[dependencies]` in `crates/scriber-kernel/Cargo.t
 - [ ] **Step 6: Run the tests**
 
 Run: `cargo test -p scriber-kernel`
-Expected: PASS, all 6 tests green
+Expected: PASS, all 7 tests green
 
 - [ ] **Step 7: Check lints**
 
