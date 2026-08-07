@@ -84,9 +84,17 @@ impl fmt::Debug for Solid {
     }
 }
 
+/// Smallest extent we accept.
+///
+/// Matches OCCT's `Precision::Confusion()`. Below this the kernel treats two
+/// points as coincident, so it will happily build a "solid" it also considers
+/// degenerate — returning Ok with an essentially zero volume rather than an
+/// error. Rejecting here is what keeps that out of the API.
+const MIN_EXTENT: f64 = 1e-7;
+
 /// Rejects dimensions OCCT would accept but should not.
 fn check_extent(name: &'static str, value: f64) -> Result<(), Error> {
-    if !value.is_finite() || value <= 0.0 {
+    if !value.is_finite() || value < MIN_EXTENT {
         return Err(Error::InvalidDimension { name, value });
     }
 
@@ -119,9 +127,34 @@ mod tests {
         let drill = Solid::cylinder(2.0, 10.0).expect("cylinder builds");
         let bored = block.cut(&drill).expect("cut succeeds");
 
-        let bored_volume = bored.volume().expect("bored volume computes");
-        let block_volume = block.volume().expect("block volume computes");
-        assert!(bored_volume < block_volume);
+        // Pin the exact analytic value, not merely "smaller" — a cut that
+        // silently did nothing would still be smaller than nothing at all.
+        let expected = 1000.0 - std::f64::consts::PI * 2.0 * 2.0 * 10.0 / 4.0;
+        let actual = bored.volume().expect("bored volume computes");
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn sub_tolerance_dimensions_are_rejected() {
+        // Positive and finite, but below OCCT's confusion tolerance, so the
+        // kernel would return Ok with geometry it considers degenerate.
+        let err = Solid::cylinder(1e-12, 1.0).expect_err("must be rejected");
+        assert!(
+            matches!(err, Error::InvalidDimension { name: "radius", .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cutting_away_everything_reports_an_empty_result() {
+        let small = Solid::cuboid(1.0, 1.0, 1.0).expect("small builds");
+        let large = Solid::cuboid(10.0, 10.0, 10.0).expect("large builds");
+
+        let err = small.cut(&large).expect_err("must report an empty result");
+        assert!(matches!(err, Error::EmptyResult), "got {err:?}");
     }
 
     #[test]
@@ -155,7 +188,9 @@ mod tests {
     #[test]
     fn step_export_writes_a_file() {
         let solid = Solid::cuboid(1.0, 1.0, 1.0).expect("cuboid builds");
-        let path = std::env::temp_dir().join("scriber_kernel_export.step");
+        let path =
+            std::env::temp_dir().join(format!("scriber_kernel_export_{}.step", std::process::id()));
+        std::fs::remove_file(&path).ok();
 
         solid.write_step(&path).expect("export succeeds");
         assert!(path.metadata().expect("file exists").len() > 0);

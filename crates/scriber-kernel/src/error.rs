@@ -2,13 +2,16 @@ use std::path::PathBuf;
 
 /// Errors produced by geometry operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
-    /// A dimension was not a finite positive number.
+    /// A dimension was not a usable finite length.
     ///
     /// OCCT does not reliably reject these — `make_cylinder(0.0, 1.0)` returns
-    /// a valid-looking shape of zero volume, and a negative height only fails
-    /// later during a volume query. We validate at the boundary instead.
-    #[error("{name} must be a finite positive number, got {value}")]
+    /// a valid-looking shape of zero volume, a negative height only fails
+    /// later during a volume query, and anything below OCCT's confusion
+    /// tolerance yields geometry the kernel treats as degenerate without
+    /// reporting an error. We validate at the boundary instead.
+    #[error("{name} must be finite and at least 1e-7, got {value}")]
     InvalidDimension { name: &'static str, value: f64 },
 
     /// OCCT raised a failure. Carries the kernel's own message.
