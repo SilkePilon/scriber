@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -9,6 +10,9 @@
 #include <Message_Messenger.hxx>
 #include <Message_PrinterOStream.hxx>
 #include <Standard_Failure.hxx>
+// Still required: STANDARD_TYPE() in silence_kernel_console() below is defined
+// here. It is no longer needed for the failure path, which used to call
+// DynamicType()->Name().
 #include <Standard_Type.hxx>
 #include <TopoDS_Shape.hxx>
 
@@ -34,31 +38,34 @@ inline void silence_kernel_console() {
   (void)done;
 }
 
-// OCCT signals failure by raising Standard_Failure, which derives from
-// Standard_Transient and NOT from std::exception. cxx's generated catch
-// handler only looks for std::exception, so an untranslated OCCT failure
-// would unwind straight through an extern "C" frame and abort the process.
+// OCCT signals failure by raising Standard_Failure. On 7.x it derives from
+// Standard_Transient and NOT from std::exception, so cxx's generated handler
+// -- which only looks for std::exception -- would let it unwind straight
+// through an extern "C" frame and abort the process. Every shim function that
+// calls into OCCT must therefore route through this guard, so the failure
+// arrives in Rust as an Err instead of terminating.
 //
-// Every shim function that calls into OCCT must route through this guard so
-// the failure arrives in Rust as an Err instead of terminating.
+// Clause order below is load-bearing and must not be rearranged: on 8.x
+// Standard_Failure IS a std::exception, so if the generic rethrow clause came
+// first it would swallow every OCCT failure and drop its class name from the
+// message.
 template <typename Body>
 auto guard(Body &&body) -> decltype(body()) {
   try {
     return std::forward<Body>(body)();
   } catch (const Standard_Failure &failure) {
-    // Many OCCT failures carry an empty message, so lead with the exception
-    // class name (Standard_DomainError, StdFail_NotDone, ...) which is always
-    // present and is usually the more diagnostic half.
-    const Standard_CString kind = failure.DynamicType()->Name();
-    std::string text = kind != nullptr ? kind : "Standard_Failure";
+    // Print() writes "ExceptionClass: message" and is the only accessor that
+    // exists in both OCCT 7.x and 8.x. Do not reach for the alternatives:
+    // DynamicType() exists only in 7.x (8.0 dropped Standard_Transient as the
+    // base and derives Standard_Failure from std::exception instead), and
+    // ExceptionType() exists only in 8.x. We develop on 7.9.3 and ship 8.0.1,
+    // so anything version-specific compiles here and breaks in the Flatpak.
+    std::ostringstream stream;
+    failure.Print(stream);
 
-    const Standard_CString message = failure.GetMessageString();
-    if (message != nullptr && *message != '\0') {
-      text += ": ";
-      text += message;
-    }
-
-    throw std::runtime_error(text);
+    const std::string text = stream.str();
+    throw std::runtime_error(text.empty() ? "OpenCASCADE operation failed"
+                                          : text);
   } catch (const std::exception &) {
     // Already the shape cxx expects (including the shim's own throws, such as
     // the IsDone() check in cut), so let it through with its message intact
