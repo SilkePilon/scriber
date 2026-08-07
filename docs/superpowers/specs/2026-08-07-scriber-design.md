@@ -78,8 +78,10 @@ cover them.
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Geometry kernel | OpenCascade via `opencascade-rs` | The only open kernel with production-grade NURBS, booleans, fillet, shell, loft, sweep, and STEP/IGES. Pure-Rust `truck` would mean writing kernel features for years; Fornjot shut down without reaching its goals. |
-| Kernel license | LGPL-2.1, dynamically linked | Keeps the application permissive (MIT/Apache-2.0). |
+| Geometry kernel | OpenCASCADE Technology (OCCT) 8.0.1 | The only open kernel with production-grade NURBS, booleans, fillet, shell, loft, sweep, and STEP/IGES. Actively developed — 8.0.1 released 2026-07-30, over 500 changes since 7.9.0. Pure-Rust `truck` would mean writing kernel features for years; Fornjot shut down without reaching its goals. |
+| Kernel bindings | Our own `cxx` bridge, written in-house as `scriber-occt` | We do not depend on a third-party binding crate. `opencascade-rs` is alive but its crates.io release is from 2023, and its source is LGPL-2.1 without exception, so vendoring it would force the application to LGPL. Writing our own bridge means we own the FFI, extend it exactly when a milestone needs it, and keep the app permissive. It may be read for reference; its code is not copied. |
+| Kernel license | OCCT is LGPL-2.1 **with the Open CASCADE exception**; linked dynamically | The exception permits distributing object code that incorporates OCCT header material (inline functions, templates) under terms of our choice, provided we give prominent notice that the software is based on OCCT. It does **not** waive LGPL relinking for the library itself, so OCCT is linked dynamically. Together this keeps Scriber under MIT/Apache-2.0. |
+| Attribution | Required | The OCCT exception obliges prominent notice in supporting documentation that Scriber makes use of and is based on facilities provided by OpenCASCADE Technology. This appears in the README, the About dialog, and `docs/`. |
 | Constraint solver | Written in-house, Rust | SolveSpace's `slvs` is GPLv3 and would relicense the whole app. FreeCAD's `planegcs` is LGPL but adds a second C++ FFI surface entangled with FreeCAD's build. Solving this ourselves keeps the codebase one language and integrates directly with the DSL. |
 | UI fidelity | GNOME HIG wins; Shapr3D interaction model kept | Adwaita widgets, system theming, GNOME shortcuts. The behavior — adaptive tool prediction, push-pull, minimal chrome — is Shapr3D's. |
 | Window layout | Edge-to-edge viewport with floating tool overlays | Chosen by the user. Built with `GtkOverlay` plus the Adwaita `.osd` style class, which is the same pattern Loupe, Totem, and Camera use for controls over a canvas. Native-looking rather than custom chrome. |
@@ -98,8 +100,12 @@ cover them.
 ### 4.1 Crates
 
 ```
-scriber-kernel   OpenCascade FFI. Solids, booleans, features, tessellation,
-                 STEP / IGES / STL / 3MF / OBJ / X_T. Runs on one dedicated thread.
+scriber-occt     Our own `cxx` bridge to OCCT's C++ API. Unsafe FFI lives here and
+                 nowhere else. Grows one milestone at a time; no third-party
+                 binding crate. Dynamically links libTK* from OCCT 8.0.x.
+scriber-kernel   Safe, idiomatic Rust geometry API over scriber-occt. Solids,
+                 booleans, features, tessellation, STEP / IGES / STL / 3MF / OBJ /
+                 X_T. Runs on one dedicated thread.
 scriber-solver   2D constraint solver. Sparse Levenberg-Marquardt, DOF analysis,
                  auto-constrain heuristics.
 scriber-lang     The DSL. Lexer, parser, AST, lossless printer, units, expressions,
@@ -368,7 +374,7 @@ Each milestone is independently shippable and testable.
 
 | M | Deliverable |
 | --- | --- |
-| 0 | Workspace skeleton, Flatpak manifest, self-hosted repo publishing pipeline, CI. `opencascade-rs` linking proven with a box-minus-cylinder boolean. |
+| 0 | Workspace skeleton, Flatpak manifest building OCCT 8.0.1 as a shared module, self-hosted repo publishing pipeline, CI. `scriber-occt` bridge bootstrapped and proven end to end with a box-minus-cylinder boolean exported to STEP. |
 | 1 | `scriber-lang` + `scriber-doc` + `scriber-cli`. Headless: document in, STEP and STL out. No GUI. |
 | 2 | GTK4 shell, `GtkGLArea` viewport, tessellation, ID-buffer picking, camera, view cube. |
 | 3 | `scriber-solver`, sketcher UI, auto-constrain, fully-defined indicator. |
@@ -388,7 +394,8 @@ usable. Milestone 4 is the first point at which it is recognisably a CAD applica
 
 | Risk | Mitigation |
 | --- | --- |
-| `opencascade-rs` bindings are incomplete and we will need to extend them | Budget for upstream contribution from M0. Keep our FFI additions in a single module so they can be upstreamed. |
+| Writing and maintaining our own OCCT bridge is ongoing work | Wrap only what the current milestone needs; never wrap speculatively. All unsafe FFI is confined to `scriber-occt` so the rest of the codebase stays safe Rust. OCCT's C++ API is stable across patch releases, so churn is low. `opencascade-rs` remains available to read as a reference for how a given OCCT call is bridged. |
+| OCCT must be dynamically linked to stay within the LGPL exception | The Flatpak manifest builds OCCT 8.0.1 as a shared library module; `scriber-occt`'s build script links against it rather than embedding it. A CI check asserts the produced binary has a dynamic `libTKernel` dependency and no statically embedded OCCT objects. |
 | Topological naming is an unsolved problem in open-source CAD | The hybrid selector plus an explicit repair UI accepts that automatic resolution will sometimes fail, and makes failure recoverable rather than silent. This is a UX answer to a problem with no clean technical answer. |
 | Writing a constraint solver is substantial work | Well-documented mathematics with published references. Scoped to 2D; 3D constraints are out of scope. |
 | Lossless round-trip constrains DSL design permanently | Establish the property test in M1, before any GUI depends on the printer. |
