@@ -818,7 +818,7 @@ git commit -m "feat(occt): add STEP export"
 **Interfaces:**
 - Consumes: `scriber_occt::ffi::{Shape, make_box, make_cylinder, cut, volume, write_step}`.
 - Produces:
-  - `scriber_kernel::Error` — enum with variants `Kernel(String)`, `StepWriteFailed { path: PathBuf }`, and `EmptyResult`.
+  - `scriber_kernel::Error` — enum with variants `InvalidDimension { name: &'static str, value: f64 }`, `Kernel(String)`, `StepWriteFailed { path: PathBuf, reason: String }`, and `EmptyResult`, plus `From<cxx::Exception>`.
   - `scriber_kernel::Solid` with:
     - `Solid::cuboid(dx: f64, dy: f64, dz: f64) -> Result<Solid, Error>`
     - `Solid::cylinder(radius: f64, height: f64) -> Result<Solid, Error>`
@@ -986,6 +986,14 @@ pub use error::Error;
 pub struct Solid {
     inner: UniquePtr<ffi::Shape>,
     _not_sync: PhantomData<Rc<()>>,
+}
+
+// `ffi::Shape` is opaque, so Debug cannot be derived — but Result::expect_err
+// in the tests requires the Ok type to be Debug.
+impl std::fmt::Debug for Solid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Solid { .. }")
+    }
 }
 
 impl Solid {
