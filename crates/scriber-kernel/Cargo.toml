@@ -7,4 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cxx.workspace = true
+scriber-occt = { path = "../scriber-occt", version = "0.1.0" }
 thiserror.workspace = true
