@@ -44,10 +44,24 @@ auto guard(Body &&body) -> decltype(body()) {
     }
 
     throw std::runtime_error(text);
+  } catch (const std::exception &) {
+    // Already the shape cxx expects (including the shim's own throws, such as
+    // the IsDone() check in cut), so let it through with its message intact
+    // rather than flattening it into the catch-all below.
+    throw;
+  } catch (...) {
+    // OCCT's hierarchy is rooted at Standard_Failure and cxx already handles
+    // std::exception, so reaching here should be impossible. Catching anyway
+    // costs nothing and keeps a stray throw from aborting the process.
+    throw std::runtime_error("unknown C++ exception from OpenCASCADE");
   }
 }
 
 std::unique_ptr<Shape> make_box(double dx, double dy, double dz);
+
+std::unique_ptr<Shape> make_cylinder(double radius, double height);
+
+std::unique_ptr<Shape> cut(const Shape &target, const Shape &tool);
 
 double volume(const Shape &shape);
 
