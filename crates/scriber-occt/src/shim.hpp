@@ -2,9 +2,11 @@
 
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include <Standard_Failure.hxx>
+#include <Standard_Type.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include "rust/cxx.h"
@@ -29,10 +31,19 @@ auto guard(Body &&body) -> decltype(body()) {
   try {
     return std::forward<Body>(body)();
   } catch (const Standard_Failure &failure) {
+    // Many OCCT failures carry an empty message, so lead with the exception
+    // class name (Standard_DomainError, StdFail_NotDone, ...) which is always
+    // present and is usually the more diagnostic half.
+    const Standard_CString kind = failure.DynamicType()->Name();
+    std::string text = kind != nullptr ? kind : "Standard_Failure";
+
     const Standard_CString message = failure.GetMessageString();
-    throw std::runtime_error(message != nullptr && *message != '\0'
-                                 ? message
-                                 : "OpenCASCADE operation failed");
+    if (message != nullptr && *message != '\0') {
+      text += ": ";
+      text += message;
+    }
+
+    throw std::runtime_error(text);
   }
 }
 
