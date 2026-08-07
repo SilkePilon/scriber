@@ -22,7 +22,9 @@ fn smoke_command_writes_a_step_file() {
     assert!(contents.starts_with("ISO-10303-21;"));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("volume"), "stdout was: {stdout}");
+    // Pin the value, not just the label: a boolean that silently did nothing
+    // would print 1000.0000 and still contain the word "volume".
+    assert!(stdout.contains("968.5841"), "stdout was: {stdout}");
 
     std::fs::remove_file(&output_path).ok();
 }

@@ -1,6 +1,9 @@
 //! Headless entry point for Scriber.
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use clap::{Parser, Subcommand};
 use scriber_kernel::Solid;
@@ -36,14 +39,17 @@ fn main() -> ExitCode {
     }
 }
 
-fn smoke(output: &PathBuf) -> Result<(), scriber_kernel::Error> {
+fn smoke(output: &Path) -> Result<(), scriber_kernel::Error> {
     let block = Solid::cuboid(10.0, 10.0, 10.0)?;
     let drill = Solid::cylinder(2.0, 10.0)?;
     let bored = block.cut(&drill)?;
 
+    // Query the volume before writing, so a failure here cannot leave a
+    // half-finished file behind.
+    let volume = bored.volume()?;
     bored.write_step(output)?;
 
-    println!("wrote {} — volume {:.4}", output.display(), bored.volume()?);
+    println!("wrote {} — volume {volume:.4}", output.display());
 
     Ok(())
 }
