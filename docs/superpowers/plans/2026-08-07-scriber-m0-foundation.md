@@ -710,34 +710,40 @@ And this function inside `namespace scriber`:
 ```cpp
 namespace {
 
-// OCCT's default messenger prints a "Statistics on Transfer" banner to stdout
-// on every write. A CAD application owns its own stdout, so drop the console
-// printers once, the first time we touch the data-exchange layer.
-void silence_kernel_console() {
-  static const bool done = [] {
-    Message::DefaultMessenger()->RemovePrinters(
-        STANDARD_TYPE(Message_PrinterOStream));
-    return true;
-  }();
-  (void)done;
+// Symbolic name for the status, so the message does not depend on an integer
+// whose meaning a reader would have to go look up.
+const char *status_name(IFSelect_ReturnStatus status) {
+  switch (status) {
+    case IFSelect_RetVoid:
+      return "IFSelect_RetVoid";
+    case IFSelect_RetDone:
+      return "IFSelect_RetDone";
+    case IFSelect_RetError:
+      return "IFSelect_RetError";
+    case IFSelect_RetFail:
+      return "IFSelect_RetFail";
+    case IFSelect_RetStop:
+      return "IFSelect_RetStop";
+  }
+
+  return "IFSelect_Ret<unknown>";
 }
 
 }  // namespace
 
 void write_step(const Shape &shape, rust::Str path) {
   guard([&] {
-    silence_kernel_console();
-
     STEPControl_Writer writer;
 
-    // OCCT reports the useful detail to its messenger, not through the
-    // exception, so fold the status code and path into the message we throw.
-    // It is all Task 5 has to put in Error::StepWriteFailed { reason }.
+    // OCCT reports the useful detail to its own messenger, never through the
+    // exception, so the status is all we can hand back. It becomes the
+    // `reason` in Task 5's Error::StepWriteFailed. The path is deliberately
+    // NOT included — Rust already knows it and would print it twice.
     const IFSelect_ReturnStatus transferred =
         writer.Transfer(shape.inner, STEPControl_AsIs);
     if (transferred != IFSelect_RetDone) {
-      throw std::runtime_error("STEP transfer failed with status " +
-                               std::to_string(static_cast<int>(transferred)));
+      throw std::runtime_error(std::string("STEP transfer failed (") +
+                               status_name(transferred) + ")");
     }
 
     // rust::Str is not null-terminated, so copy before handing to OCCT.
@@ -745,13 +751,36 @@ void write_step(const Shape &shape, rust::Str path) {
 
     const IFSelect_ReturnStatus written = writer.Write(target.c_str());
     if (written != IFSelect_RetDone) {
-      throw std::runtime_error("STEP write to '" + target +
-                               "' failed with status " +
-                               std::to_string(static_cast<int>(written)));
+      throw std::runtime_error(std::string("STEP write failed (") +
+                               status_name(written) + ")");
     }
   });
 }
 ```
+
+**Silencing OCCT's console output.** OCCT's default messenger prints to stdout —
+a transfer banner on every write, and diagnostics from other subsystems. A CLI
+owns its stdout, so the printers are removed once, eagerly, from the top of
+*every* shim entry point rather than lazily inside `write_step`. Doing it lazily
+would let kernel chatter escape during the `make_box`/`cut` calls that precede
+the first write. Add to `shim.hpp`, inside `namespace scriber`, above `guard()`:
+
+```cpp
+// Drops OCCT's console printers the first time any shim function runs, so
+// kernel diagnostics never land on stdout. The function-local static makes
+// this thread-safe and once-only under C++11 and later.
+inline void silence_kernel_console() {
+  static const bool done = [] {
+    Message::DefaultMessenger()->RemovePrinters(
+        STANDARD_TYPE(Message_PrinterOStream));
+    return true;
+  }();
+  (void)done;
+}
+```
+
+Call `silence_kernel_console();` as the first statement of `make_box`,
+`make_cylinder`, `cut`, `volume`, and `write_step`.
 
 `guard()` deduces a `void` return here, which is well-formed — do not add a
 dummy return value.
