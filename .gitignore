@@ -4,3 +4,7 @@
 *.scrz
 .flatpak-builder/
 build/
+/build-dir/
+/repo/
+/pages/
+scriber.gpg.sec

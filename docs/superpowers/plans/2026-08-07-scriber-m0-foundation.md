@@ -268,12 +268,12 @@ Create `crates/scriber-occt/src/shim.hpp`:
 #pragma once
 
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 #include <Standard_Failure.hxx>
-#include <Standard_Type.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include "rust/cxx.h"
@@ -298,19 +298,18 @@ auto guard(Body &&body) -> decltype(body()) {
   try {
     return std::forward<Body>(body)();
   } catch (const Standard_Failure &failure) {
-    // Many OCCT failures carry an empty message, so lead with the exception
-    // class name (Standard_DomainError, StdFail_NotDone, ...) which is always
-    // present and is usually the more diagnostic half.
-    const Standard_CString kind = failure.DynamicType()->Name();
-    std::string text = kind != nullptr ? kind : "Standard_Failure";
+    // Print() writes "ExceptionClass: message" and is the only accessor that
+    // exists in both OCCT 7.x and 8.x. Do not reach for the alternatives:
+    // DynamicType() exists only in 7.x (8.0 dropped Standard_Transient as the
+    // base and derives Standard_Failure from std::exception instead), and
+    // ExceptionType() exists only in 8.x. We develop on 7.9.3 and ship 8.0.1,
+    // so anything version-specific compiles here and breaks in the Flatpak.
+    std::ostringstream stream;
+    failure.Print(stream);
 
-    const Standard_CString message = failure.GetMessageString();
-    if (message != nullptr && *message != '\0') {
-      text += ": ";
-      text += message;
-    }
-
-    throw std::runtime_error(text);
+    const std::string text = stream.str();
+    throw std::runtime_error(text.empty() ? "OpenCASCADE operation failed"
+                                          : text);
   } catch (const std::exception &) {
     // Shim functions throw std::runtime_error themselves for non-raising
     // failures (a boolean that reports IsDone() == false, for example).
