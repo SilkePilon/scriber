@@ -106,6 +106,11 @@ mod tests {
         let path = std::env::temp_dir().join("scriber_occt_write_step.step");
         let path_str = path.to_str().expect("temp path is valid UTF-8");
 
+        // A leftover file from an earlier run would satisfy both assertions
+        // below even if this write did nothing, so start from a clean slate.
+        std::fs::remove_file(&path).ok();
+        assert!(!path.exists(), "could not clear the stale file at {path:?}");
+
         ffi::write_step(&shape, path_str).expect("write_step succeeds");
 
         let contents = std::fs::read_to_string(&path).expect("STEP file is readable");
@@ -123,18 +128,36 @@ mod tests {
     }
 
     #[test]
-    fn unwritable_step_path_is_an_error_not_a_crash() {
-        // Same contract as the degenerate primitives: a failure inside the shim
-        // must arrive as an Err, not abort the process. The write here cannot
-        // succeed because the parent directory does not exist.
+    fn unwritable_step_path_reports_the_path_and_status() {
+        // Scope note: this is NOT an abort-prevention test. OCCT's STEP writer
+        // never lets a Standard_Failure escape Transfer() or Write() -- it
+        // catches the raise itself and reports IFSelect_RetStop (4), whose own
+        // header glosses it as "indicates end or stop (such as Raise)". Every
+        // failure reachable through this bridge lands there (missing parent, a
+        // directory, an empty path, /dev/full, a read-only mount, a symlink
+        // loop), and the degenerate shapes that are constructible here
+        // (zero/NaN/infinite dimensions, the empty compound from cutting a box
+        // with itself) all transfer and write successfully. So the shim raises
+        // std::runtime_error, which cxx handles unaided; guard()'s
+        // Standard_Failure clause is exercised by the primitive tests above,
+        // not by this one.
+        //
+        // What this pins is the message: OCCT reports the useful detail to its
+        // messenger rather than through the exception, so the shim has to fold
+        // the path and status in itself. Task 5's Error::StepWriteFailed
+        // { path, reason } has nothing else to work from.
         let shape = ffi::make_box(1.0, 1.0, 1.0).expect("box builds");
         let error = ffi::write_step(&shape, "/nonexistent-directory-scriber/model.step")
             .expect_err("expected a write into a missing directory to be rejected");
 
+        let message = error.what();
         assert!(
-            error.what().contains("STEP write failed"),
-            "expected the shim's own message to survive the guard, got: {}",
-            error.what()
+            message.contains("/nonexistent-directory-scriber/model.step"),
+            "expected the failing path in the message, got: {message}"
+        );
+        assert!(
+            message.contains("status 4"),
+            "expected the IFSelect_RetStop status in the message, got: {message}"
         );
     }
 }
