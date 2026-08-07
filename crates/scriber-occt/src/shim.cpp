@@ -7,15 +7,18 @@
 namespace scriber {
 
 std::unique_ptr<Shape> make_box(double dx, double dy, double dz) {
-  BRepPrimAPI_MakeBox builder(dx, dy, dz);
-  builder.Build();
-  return std::make_unique<Shape>(Shape{builder.Shape()});
+  return guard([&] {
+    BRepPrimAPI_MakeBox builder(dx, dy, dz);
+    return std::make_unique<Shape>(Shape{builder.Shape()});
+  });
 }
 
 double volume(const Shape &shape) {
-  GProp_GProps props;
-  BRepGProp::VolumeProperties(shape.inner, props);
-  return props.Mass();
+  return guard([&] {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape.inner, props);
+    return props.Mass();
+  });
 }
 
 }  // namespace scriber
