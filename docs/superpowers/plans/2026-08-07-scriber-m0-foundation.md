@@ -1191,7 +1191,9 @@ fn smoke_command_writes_a_step_file() {
     assert!(contents.starts_with("ISO-10303-21;"));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("volume"), "stdout was: {stdout}");
+    // Pin the value, not just the label: a boolean that silently did nothing
+    // would print 1000.0000 and still contain the word "volume".
+    assert!(stdout.contains("968.5841"), "stdout was: {stdout}");
 
     std::fs::remove_file(&output_path).ok();
 }
@@ -1209,7 +1211,10 @@ Create `crates/scriber-cli/src/main.rs`:
 ```rust
 //! Headless entry point for Scriber.
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use clap::{Parser, Subcommand};
 use scriber_kernel::Solid;
@@ -1245,14 +1250,17 @@ fn main() -> ExitCode {
     }
 }
 
-fn smoke(output: &PathBuf) -> Result<(), scriber_kernel::Error> {
+fn smoke(output: &Path) -> Result<(), scriber_kernel::Error> {
     let block = Solid::cuboid(10.0, 10.0, 10.0)?;
     let drill = Solid::cylinder(2.0, 10.0)?;
     let bored = block.cut(&drill)?;
 
+    // Query the volume before writing, so a failure here cannot leave a
+    // half-finished file behind.
+    let volume = bored.volume()?;
     bored.write_step(output)?;
 
-    println!("wrote {} — volume {:.4}", output.display(), bored.volume()?);
+    println!("wrote {} — volume {volume:.4}", output.display());
 
     Ok(())
 }
@@ -1564,7 +1572,7 @@ jobs:
           flatpak remote-add --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install -y --noninteractive flathub \
-            org.gnome.Platform//49 org.gnome.Sdk//49 \
+            org.gnome.Platform//50 org.gnome.Sdk//50 \
             org.freedesktop.Sdk.Extension.rust-stable//25.08
 
       - name: Import the signing key
