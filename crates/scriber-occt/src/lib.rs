@@ -22,6 +22,9 @@ pub mod ffi {
 
         /// Enclosed volume of a solid, in model units cubed.
         fn volume(shape: &Shape) -> Result<f64>;
+
+        /// Writes `shape` to `path` as AP214 STEP.
+        fn write_step(shape: &Shape, path: &str) -> Result<()>;
     }
 }
 
@@ -93,6 +96,44 @@ mod tests {
         assert!(
             error.what().contains("Standard_ConstructionError"),
             "expected the OCCT exception class in the message, got: {}",
+            error.what()
+        );
+    }
+
+    #[test]
+    fn write_step_produces_a_valid_header() {
+        let shape = ffi::make_box(1.0, 1.0, 1.0).expect("box builds");
+        let path = std::env::temp_dir().join("scriber_occt_write_step.step");
+        let path_str = path.to_str().expect("temp path is valid UTF-8");
+
+        ffi::write_step(&shape, path_str).expect("write_step succeeds");
+
+        let contents = std::fs::read_to_string(&path).expect("STEP file is readable");
+        assert!(
+            contents.starts_with("ISO-10303-21;"),
+            "file does not start with a STEP header: {:?}",
+            &contents[..contents.len().min(40)]
+        );
+        assert!(
+            contents.contains("END-ISO-10303-21;"),
+            "STEP file is truncated"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn unwritable_step_path_is_an_error_not_a_crash() {
+        // Same contract as the degenerate primitives: a failure inside the shim
+        // must arrive as an Err, not abort the process. The write here cannot
+        // succeed because the parent directory does not exist.
+        let shape = ffi::make_box(1.0, 1.0, 1.0).expect("box builds");
+        let error = ffi::write_step(&shape, "/nonexistent-directory-scriber/model.step")
+            .expect_err("expected a write into a missing directory to be rejected");
+
+        assert!(
+            error.what().contains("STEP write failed"),
+            "expected the shim's own message to survive the guard, got: {}",
             error.what()
         );
     }

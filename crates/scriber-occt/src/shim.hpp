@@ -65,4 +65,6 @@ std::unique_ptr<Shape> cut(const Shape &target, const Shape &tool);
 
 double volume(const Shape &shape);
 
+void write_step(const Shape &shape, rust::Str path);
+
 }  // namespace scriber
