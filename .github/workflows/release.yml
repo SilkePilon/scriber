@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:44
+      options: --privileged
+    steps:
+      - name: Install the flatpak toolchain
+        run: dnf install -y flatpak flatpak-builder git ostree
+
+      - uses: actions/checkout@v4
+
+      - name: Add flathub and install the runtime
+        run: |
+          flatpak remote-add --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install -y --noninteractive flathub \
+            org.gnome.Platform//50 org.gnome.Sdk//50 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+      - name: Import the signing key
+        env:
+          KEY: ${{ secrets.FLATPAK_GPG_KEY }}
+        run: echo "$KEY" | base64 -d | gpg --batch --import
+
+      - name: Fetch the existing repository
+        # Keeps history so users receive deltas rather than full redownloads.
+        run: |
+          git clone --branch gh-pages --depth 1 \
+            "https://github.com/${GITHUB_REPOSITORY}.git" pages || mkdir -p pages
+
+      - name: Build
+        run: |
+          flatpak-builder --force-clean --disable-rofiles-fuse \
+            --repo=pages/repo \
+            --gpg-sign=${{ secrets.FLATPAK_GPG_KEYID }} \
+            build-dir build-aux/io.github.SilkePilon.Scriber.yaml
+
+      - name: Update repository metadata and generate deltas
+        run: |
+          flatpak build-update-repo \
+            --generate-static-deltas --prune \
+            --gpg-sign=${{ secrets.FLATPAK_GPG_KEYID }} \
+            pages/repo
+
+      - name: Build the standalone bundle
+        run: |
+          flatpak build-bundle pages/repo \
+            "Scriber-${GITHUB_REF_NAME}-x86_64.flatpak" \
+            io.github.SilkePilon.Scriber \
+            --gpg-sign=${{ secrets.FLATPAK_GPG_KEYID }}
+
+      - name: Write the remote definitions
+        run: |
+          cp scriber.gpg pages/scriber.gpg
+          KEY_B64=$(base64 -w0 scriber.gpg)
+          BASE="https://SilkePilon.github.io/scriber"
+
+          cat > pages/scriber.flatpakrepo <<EOF
+          [Flatpak Repo]
+          Title=Scriber
+          Url=${BASE}/repo/
+          Homepage=https://github.com/SilkePilon/scriber
+          Comment=Local-only 3D CAD for GNOME
+          GPGKey=${KEY_B64}
+          EOF
+
+          cat > pages/scriber.flatpakref <<EOF
+          [Flatpak Ref]
+          Title=Scriber
+          Name=io.github.SilkePilon.Scriber
+          Branch=master
+          Url=${BASE}/repo/
+          RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
+          IsRuntime=false
+          GPGKey=${KEY_B64}
+          EOF
+
+      - name: Publish to Pages
+        run: |
+          cd pages
+          git init -b gh-pages 2>/dev/null || true
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add -A
+          git commit -m "release ${GITHUB_REF_NAME}"
+          git push --force \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" \
+            gh-pages
+
+      - name: Attach the bundle to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Scriber-*.flatpak

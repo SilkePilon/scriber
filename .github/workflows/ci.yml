@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Fedora 44 ships OCCT 7.9.3, matching the documented development
+    # environment. Ubuntu runners carry an OCCT too old for the TKDE* names.
+    container: fedora:44
+    steps:
+      - name: Install build dependencies
+        run: dnf install -y opencascade-devel cmake gcc-c++ git python3 python3-pip
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Assert OCCT is dynamically linked
+        run: |
+          cargo build --bin scriber
+          ./scripts/check-dynamic-occt.sh target/debug/scriber
+
+      - name: Assert the vendored cargo sources are current
+        # Flatpak builds offline, so build-aux/cargo-sources.json must match
+        # Cargo.lock exactly. A stale file fails inside the sandbox with an
+        # opaque "no matching package" error, so catch it here instead.
+        run: |
+          python3 -m venv /tmp/cargo-sources-venv
+          /tmp/cargo-sources-venv/bin/pip install --quiet aiohttp toml tomlkit
+          python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py', '/tmp/flatpak-cargo-generator.py')"
+          /tmp/cargo-sources-venv/bin/python /tmp/flatpak-cargo-generator.py \
+            Cargo.lock -o /tmp/cargo-sources.json
+          if ! diff -u build-aux/cargo-sources.json /tmp/cargo-sources.json; then
+            echo "build-aux/cargo-sources.json is stale relative to Cargo.lock." >&2
+            echo "Regenerate it with flatpak-cargo-generator.py and commit the result." >&2
+            exit 1
+          fi
