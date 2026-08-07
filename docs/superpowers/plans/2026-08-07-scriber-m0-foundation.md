@@ -1297,12 +1297,14 @@ Replace every `OWNER` below with the real GitHub account name before starting.
 - [ ] **Step 1: Install the Flatpak toolchain and runtime**
 
 ```bash
-sudo dnf install -y flatpak flatpak-builder
 flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak install -y flathub org.gnome.Platform//49 org.gnome.Sdk//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
+flatpak install -y flathub org.gnome.Platform//50 org.gnome.Sdk//50 org.freedesktop.Sdk.Extension.rust-stable//25.08
 ```
 
-The GNOME 49 runtime is the current supported branch; GNOME 48 reached end of life on 2026-03-24.
+GNOME 50 is the current supported branch (48 reached end of life on 2026-03-24,
+and 49 remains supported). On the development machine `flatpak-builder`,
+`org.gnome.Platform//50`, `org.gnome.Sdk//50` and `rust-stable//25.08` are
+already installed, so this step is a no-op there.
 
 - [ ] **Step 2: Write the manifest**
 
@@ -1311,7 +1313,7 @@ Create `build-aux/io.github.OWNER.Scriber.yaml`:
 ```yaml
 id: io.github.OWNER.Scriber
 runtime: org.gnome.Platform
-runtime-version: '49'
+runtime-version: '50'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
