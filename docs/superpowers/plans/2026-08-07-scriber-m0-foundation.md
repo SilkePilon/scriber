@@ -1394,7 +1394,7 @@ Flatpak builds have no network, so every crate must be declared:
 
 ```bash
 pip install --user aiohttp toml
-curl -fsSL https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py -o /tmp/flatpak-cargo-generator.py
+curl -fsSL https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/737c0085912f9f7dabf9341d4608e2a77a51a73a/cargo/flatpak-cargo-generator.py -o /tmp/flatpak-cargo-generator.py
 python3 /tmp/flatpak-cargo-generator.py Cargo.lock -o build-aux/cargo-sources.json
 ```
 
