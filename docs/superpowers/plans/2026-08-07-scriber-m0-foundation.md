@@ -268,7 +268,10 @@ Create `crates/scriber-occt/src/shim.hpp`:
 #pragma once
 
 #include <memory>
+#include <stdexcept>
+#include <utility>
 
+#include <Standard_Failure.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include "rust/cxx.h"
@@ -280,6 +283,25 @@ namespace scriber {
 struct Shape {
   TopoDS_Shape inner;
 };
+
+// OCCT signals failure by raising Standard_Failure, which derives from
+// Standard_Transient and NOT from std::exception. cxx's generated catch
+// handler only looks for std::exception, so an untranslated OCCT failure
+// would unwind straight through an extern "C" frame and abort the process.
+//
+// Every shim function that calls into OCCT must route through this guard so
+// the failure arrives in Rust as an Err instead of terminating.
+template <typename Body>
+auto guard(Body &&body) -> decltype(body()) {
+  try {
+    return std::forward<Body>(body)();
+  } catch (const Standard_Failure &failure) {
+    const Standard_CString message = failure.GetMessageString();
+    throw std::runtime_error(message != nullptr && *message != '\0'
+                                 ? message
+                                 : "OpenCASCADE operation failed");
+  }
+}
 
 std::unique_ptr<Shape> make_box(double dx, double dy, double dz);
 
@@ -302,19 +324,26 @@ Create `crates/scriber-occt/src/shim.cpp`:
 namespace scriber {
 
 std::unique_ptr<Shape> make_box(double dx, double dy, double dz) {
-  BRepPrimAPI_MakeBox builder(dx, dy, dz);
-  builder.Build();
-  return std::make_unique<Shape>(Shape{builder.Shape()});
+  return guard([&] {
+    BRepPrimAPI_MakeBox builder(dx, dy, dz);
+    return std::make_unique<Shape>(Shape{builder.Shape()});
+  });
 }
 
 double volume(const Shape &shape) {
-  GProp_GProps props;
-  BRepGProp::VolumeProperties(shape.inner, props);
-  return props.Mass();
+  return guard([&] {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape.inner, props);
+    return props.Mass();
+  });
 }
 
 }  // namespace scriber
 ```
+
+`BRepPrimAPI_MakeBox` raises `Standard_DomainError` for a zero or negative
+extent, and `.Shape()` raises `StdFail_NotDone` when the build failed. Both now
+arrive in Rust as `Err` rather than aborting.
 
 The include path `scriber-occt/src/shim.hpp` is the path cxx generates; it is relative to the crate's parent directory, not the filesystem root.
 
@@ -337,10 +366,10 @@ pub mod ffi {
         type Shape;
 
         /// An axis-aligned box with one corner at the origin.
-        fn make_box(dx: f64, dy: f64, dz: f64) -> UniquePtr<Shape>;
+        fn make_box(dx: f64, dy: f64, dz: f64) -> Result<UniquePtr<Shape>>;
 
         /// Enclosed volume of a solid, in model units cubed.
-        fn volume(shape: &Shape) -> f64;
+        fn volume(shape: &Shape) -> Result<f64>;
     }
 }
 
@@ -350,15 +379,26 @@ mod tests {
 
     #[test]
     fn box_has_expected_volume() {
-        let shape = ffi::make_box(2.0, 3.0, 4.0);
-        let volume = ffi::volume(&shape);
+        let shape = ffi::make_box(2.0, 3.0, 4.0).expect("box builds");
+        let volume = ffi::volume(&shape).expect("volume computes");
         assert!(
             (volume - 24.0).abs() < 1e-9,
             "expected volume 24.0, got {volume}"
         );
     }
+
+    #[test]
+    fn degenerate_box_is_an_error_not_a_crash() {
+        // OCCT raises Standard_DomainError here. If the shim's guard were
+        // missing, this would abort the test process instead of returning Err.
+        let result = ffi::make_box(0.0, 1.0, 1.0);
+        assert!(result.is_err(), "expected a zero-width box to be rejected");
+    }
 }
 ```
+
+Every function in this bridge returns `Result`. cxx generates the try/catch that
+converts the `std::runtime_error` thrown by `guard` into a Rust `Err`.
 
 - [ ] **Step 7: Write the build script**
 
@@ -435,7 +475,7 @@ fn main() {
 - [ ] **Step 8: Run the test**
 
 Run: `cargo test -p scriber-occt`
-Expected: PASS, `test tests::box_has_expected_volume ... ok`
+Expected: PASS, 2 tests — `box_has_expected_volume` and `degenerate_box_is_an_error_not_a_crash`
 
 If linking fails with an undefined symbol, find the toolkit that defines it and add it to `OCCT_TOOLKITS`:
 
@@ -473,15 +513,15 @@ Add to the `tests` module in `crates/scriber-occt/src/lib.rs`:
     #[test]
     fn cut_removes_the_tool_volume() {
         // A 10×10×10 block with a full-height radius-2 cylinder bored out.
-        let block = ffi::make_box(10.0, 10.0, 10.0);
-        let drill = ffi::make_cylinder(2.0, 10.0);
-        let bored = ffi::cut(&block, &drill);
+        let block = ffi::make_box(10.0, 10.0, 10.0).expect("block builds");
+        let drill = ffi::make_cylinder(2.0, 10.0).expect("cylinder builds");
+        let bored = ffi::cut(&block, &drill).expect("cut succeeds");
 
         // The cylinder is centred on the origin corner, so exactly one
         // quarter of it lies inside the block.
         let quarter_cylinder = std::f64::consts::PI * 2.0 * 2.0 * 10.0 / 4.0;
         let expected = 1000.0 - quarter_cylinder;
-        let actual = ffi::volume(&bored);
+        let actual = ffi::volume(&bored).expect("volume computes");
 
         assert!(
             (actual - expected).abs() < 1e-6,
@@ -518,17 +558,29 @@ And add these functions inside `namespace scriber`:
 
 ```cpp
 std::unique_ptr<Shape> make_cylinder(double radius, double height) {
-  BRepPrimAPI_MakeCylinder builder(radius, height);
-  builder.Build();
-  return std::make_unique<Shape>(Shape{builder.Shape()});
+  return guard([&] {
+    BRepPrimAPI_MakeCylinder builder(radius, height);
+    return std::make_unique<Shape>(Shape{builder.Shape()});
+  });
 }
 
 std::unique_ptr<Shape> cut(const Shape &target, const Shape &tool) {
-  BRepAlgoAPI_Cut op(target.inner, tool.inner);
-  op.Build();
-  return std::make_unique<Shape>(Shape{op.Shape()});
+  return guard([&] {
+    BRepAlgoAPI_Cut op(target.inner, tool.inner);
+    op.Build();
+
+    if (!op.IsDone()) {
+      throw std::runtime_error("boolean cut failed");
+    }
+
+    return std::make_unique<Shape>(Shape{op.Shape()});
+  });
 }
 ```
+
+Unlike the primitive builders, `BRepAlgoAPI_Cut` reports failure through
+`IsDone()` rather than always raising, so it is checked explicitly. Both paths
+end up as an `Err` in Rust.
 
 - [ ] **Step 5: Declare them in the bridge**
 
@@ -536,16 +588,16 @@ In `crates/scriber-occt/src/lib.rs`, add inside `unsafe extern "C++"`:
 
 ```rust
         /// A cylinder whose axis runs along +Z with its base at the origin.
-        fn make_cylinder(radius: f64, height: f64) -> UniquePtr<Shape>;
+        fn make_cylinder(radius: f64, height: f64) -> Result<UniquePtr<Shape>>;
 
         /// Boolean subtraction: `target` with `tool` removed.
-        fn cut(target: &Shape, tool: &Shape) -> UniquePtr<Shape>;
+        fn cut(target: &Shape, tool: &Shape) -> Result<UniquePtr<Shape>>;
 ```
 
 - [ ] **Step 6: Run the tests**
 
 Run: `cargo test -p scriber-occt`
-Expected: PASS, both tests green
+Expected: PASS, 3 tests green
 
 - [ ] **Step 7: Commit**
 
@@ -565,7 +617,7 @@ git commit -m "feat(occt): add cylinder primitive and boolean cut"
 
 **Interfaces:**
 - Consumes: `ffi::Shape`, `ffi::make_box` from Task 2.
-- Produces: `ffi::write_step(shape: &Shape, path: &str) -> bool` — returns `false` on any OCCT failure.
+- Produces: `ffi::write_step(shape: &Shape, path: &str) -> Result<()>` — `Err` on any OCCT failure, carrying OCCT's own message where it has one.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -574,11 +626,11 @@ Add to the `tests` module in `crates/scriber-occt/src/lib.rs`:
 ```rust
     #[test]
     fn write_step_produces_a_valid_header() {
-        let shape = ffi::make_box(1.0, 1.0, 1.0);
+        let shape = ffi::make_box(1.0, 1.0, 1.0).expect("box builds");
         let path = std::env::temp_dir().join("scriber_occt_write_step.step");
         let path_str = path.to_str().expect("temp path is valid UTF-8");
 
-        assert!(ffi::write_step(&shape, path_str), "write_step reported failure");
+        ffi::write_step(&shape, path_str).expect("write_step succeeds");
 
         let contents = std::fs::read_to_string(&path).expect("STEP file is readable");
         assert!(
@@ -602,7 +654,7 @@ Expected: FAIL to compile — `cannot find function 'write_step' in module 'ffi'
 In `crates/scriber-occt/src/shim.hpp`, add:
 
 ```cpp
-bool write_step(const Shape &shape, rust::Str path);
+void write_step(const Shape &shape, rust::Str path);
 ```
 
 - [ ] **Step 4: Implement it**
@@ -620,16 +672,23 @@ In `crates/scriber-occt/src/shim.cpp`, add these includes:
 And this function inside `namespace scriber`:
 
 ```cpp
-bool write_step(const Shape &shape, rust::Str path) {
-  STEPControl_Writer writer;
+void write_step(const Shape &shape, rust::Str path) {
+  guard([&] {
+    STEPControl_Writer writer;
 
-  if (writer.Transfer(shape.inner, STEPControl_AsIs) != IFSelect_RetDone) {
-    return false;
-  }
+    if (writer.Transfer(shape.inner, STEPControl_AsIs) != IFSelect_RetDone) {
+      throw std::runtime_error("STEP transfer failed");
+    }
 
-  // rust::Str is not null-terminated, so copy before handing to OCCT.
-  const std::string target(path.data(), path.size());
-  return writer.Write(target.c_str()) == IFSelect_RetDone;
+    // rust::Str is not null-terminated, so copy before handing to OCCT.
+    const std::string target(path.data(), path.size());
+
+    if (writer.Write(target.c_str()) != IFSelect_RetDone) {
+      throw std::runtime_error("STEP write failed");
+    }
+
+    return 0;  // guard() deduces its return type from the body
+  });
 }
 ```
 
@@ -638,14 +697,14 @@ bool write_step(const Shape &shape, rust::Str path) {
 In `crates/scriber-occt/src/lib.rs`, add inside `unsafe extern "C++"`:
 
 ```rust
-        /// Writes `shape` to `path` as AP214 STEP. Returns false on failure.
-        fn write_step(shape: &Shape, path: &str) -> bool;
+        /// Writes `shape` to `path` as AP214 STEP.
+        fn write_step(shape: &Shape, path: &str) -> Result<()>;
 ```
 
 - [ ] **Step 6: Run the tests**
 
 Run: `cargo test -p scriber-occt`
-Expected: PASS, all three tests green
+Expected: PASS, all 4 tests green
 
 - [ ] **Step 7: Commit**
 
@@ -666,13 +725,17 @@ git commit -m "feat(occt): add STEP export"
 **Interfaces:**
 - Consumes: `scriber_occt::ffi::{Shape, make_box, make_cylinder, cut, volume, write_step}`.
 - Produces:
-  - `scriber_kernel::Error` — enum with variants `StepWriteFailed { path: PathBuf }` and `EmptyResult`.
+  - `scriber_kernel::Error` — enum with variants `Kernel(String)`, `StepWriteFailed { path: PathBuf }`, and `EmptyResult`.
   - `scriber_kernel::Solid` with:
-    - `Solid::cuboid(dx: f64, dy: f64, dz: f64) -> Solid`
-    - `Solid::cylinder(radius: f64, height: f64) -> Solid`
+    - `Solid::cuboid(dx: f64, dy: f64, dz: f64) -> Result<Solid, Error>`
+    - `Solid::cylinder(radius: f64, height: f64) -> Result<Solid, Error>`
     - `Solid::cut(&self, tool: &Solid) -> Result<Solid, Error>`
-    - `Solid::volume(&self) -> f64`
+    - `Solid::volume(&self) -> Result<f64, Error>`
     - `Solid::write_step(&self, path: impl AsRef<Path>) -> Result<(), Error>`
+
+Every constructor and query returns `Result` because the bridge beneath can fail
+— OCCT rejects degenerate inputs, and booleans can fail internally. This is what
+makes the "safe API" claim actually true.
 
 `Solid` is deliberately not `Sync`. In later milestones all kernel work happens on one dedicated thread, and this type must not accidentally escape it.
 
@@ -700,21 +763,30 @@ mod tests {
 
     #[test]
     fn cuboid_reports_its_volume() {
-        let solid = Solid::cuboid(2.0, 3.0, 4.0);
-        assert!((solid.volume() - 24.0).abs() < 1e-9);
+        let solid = Solid::cuboid(2.0, 3.0, 4.0).expect("cuboid builds");
+        assert!((solid.volume().expect("volume computes") - 24.0).abs() < 1e-9);
     }
 
     #[test]
     fn cutting_reduces_volume() {
-        let block = Solid::cuboid(10.0, 10.0, 10.0);
-        let drill = Solid::cylinder(2.0, 10.0);
+        let block = Solid::cuboid(10.0, 10.0, 10.0).expect("block builds");
+        let drill = Solid::cylinder(2.0, 10.0).expect("cylinder builds");
         let bored = block.cut(&drill).expect("cut succeeds");
-        assert!(bored.volume() < block.volume());
+
+        let bored_volume = bored.volume().expect("bored volume computes");
+        let block_volume = block.volume().expect("block volume computes");
+        assert!(bored_volume < block_volume);
+    }
+
+    #[test]
+    fn degenerate_cuboid_is_a_kernel_error() {
+        let err = Solid::cuboid(0.0, 1.0, 1.0).expect_err("must be rejected");
+        assert!(matches!(err, Error::Kernel(_)), "got {err:?}");
     }
 
     #[test]
     fn step_export_writes_a_file() {
-        let solid = Solid::cuboid(1.0, 1.0, 1.0);
+        let solid = Solid::cuboid(1.0, 1.0, 1.0).expect("cuboid builds");
         let path = std::env::temp_dir().join("scriber_kernel_export.step");
 
         solid.write_step(&path).expect("export succeeds");
@@ -725,7 +797,7 @@ mod tests {
 
     #[test]
     fn step_export_reports_an_unwritable_path() {
-        let solid = Solid::cuboid(1.0, 1.0, 1.0);
+        let solid = Solid::cuboid(1.0, 1.0, 1.0).expect("cuboid builds");
         let err = solid
             .write_step("/nonexistent-directory/model.step")
             .expect_err("export must fail");
@@ -749,6 +821,10 @@ use std::path::PathBuf;
 /// Errors produced by geometry operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// OCCT raised a failure. Carries the kernel's own message.
+    #[error("geometry kernel error: {0}")]
+    Kernel(String),
+
     /// OCCT declined to write the STEP file.
     #[error("failed to write STEP file to {path}")]
     StepWriteFailed { path: PathBuf },
@@ -756,6 +832,12 @@ pub enum Error {
     /// A boolean operation produced no geometry.
     #[error("operation produced an empty result")]
     EmptyResult,
+}
+
+impl From<cxx::Exception> for Error {
+    fn from(exception: cxx::Exception) -> Self {
+        Error::Kernel(exception.what().to_owned())
+    }
 }
 ```
 
@@ -791,20 +873,20 @@ impl Solid {
     }
 
     /// An axis-aligned box with one corner at the origin.
-    pub fn cuboid(dx: f64, dy: f64, dz: f64) -> Self {
-        Self::from_raw(ffi::make_box(dx, dy, dz))
+    pub fn cuboid(dx: f64, dy: f64, dz: f64) -> Result<Self, Error> {
+        Ok(Self::from_raw(ffi::make_box(dx, dy, dz)?))
     }
 
     /// A cylinder whose axis runs along +Z with its base at the origin.
-    pub fn cylinder(radius: f64, height: f64) -> Self {
-        Self::from_raw(ffi::make_cylinder(radius, height))
+    pub fn cylinder(radius: f64, height: f64) -> Result<Self, Error> {
+        Ok(Self::from_raw(ffi::make_cylinder(radius, height)?))
     }
 
     /// This solid with `tool` subtracted from it.
     pub fn cut(&self, tool: &Solid) -> Result<Self, Error> {
-        let result = Self::from_raw(ffi::cut(&self.inner, &tool.inner));
+        let result = Self::from_raw(ffi::cut(&self.inner, &tool.inner)?);
 
-        if result.volume() <= 0.0 {
+        if result.volume()? <= 0.0 {
             return Err(Error::EmptyResult);
         }
 
@@ -812,8 +894,8 @@ impl Solid {
     }
 
     /// Enclosed volume, in model units cubed.
-    pub fn volume(&self) -> f64 {
-        ffi::volume(&self.inner)
+    pub fn volume(&self) -> Result<f64, Error> {
+        Ok(ffi::volume(&self.inner)?)
     }
 
     /// Writes this solid to `path` as a STEP file.
@@ -823,11 +905,8 @@ impl Solid {
             path: path.to_path_buf(),
         })?;
 
-        if ffi::write_step(&self.inner, as_str) {
-            Ok(())
-        } else {
-            Err(Error::StepWriteFailed { path: path.to_path_buf() })
-        }
+        ffi::write_step(&self.inner, as_str)
+            .map_err(|_| Error::StepWriteFailed { path: path.to_path_buf() })
     }
 }
 
@@ -842,7 +921,7 @@ Add `cxx.workspace = true` to `[dependencies]` in `crates/scriber-kernel/Cargo.t
 - [ ] **Step 6: Run the tests**
 
 Run: `cargo test -p scriber-kernel`
-Expected: PASS, all five tests green
+Expected: PASS, all 6 tests green
 
 - [ ] **Step 7: Check lints**
 
@@ -984,13 +1063,13 @@ fn main() -> ExitCode {
 }
 
 fn smoke(output: &PathBuf) -> Result<(), scriber_kernel::Error> {
-    let block = Solid::cuboid(10.0, 10.0, 10.0);
-    let drill = Solid::cylinder(2.0, 10.0);
+    let block = Solid::cuboid(10.0, 10.0, 10.0)?;
+    let drill = Solid::cylinder(2.0, 10.0)?;
     let bored = block.cut(&drill)?;
 
     bored.write_step(output)?;
 
-    println!("wrote {} — volume {:.4}", output.display(), bored.volume());
+    println!("wrote {} — volume {:.4}", output.display(), bored.volume()?);
 
     Ok(())
 }
