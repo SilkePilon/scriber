@@ -41,7 +41,7 @@ The repository is GPG-signed. Verify the key fingerprint before trusting it:
 gpg --show-keys scriber.gpg
 ```
 
-Expected fingerprint: 227A 3502 615E D0CA 6211 7A3E 98B3 BA3F 926E 29CD
+Expected fingerprint: 571D 6CC1 9961 D9CF 9EE7 9878 CFF5 3738 0F68 A138
 
 ## Usage
 
@@ -71,6 +71,21 @@ real geometry rather than reporting success it did not earn.
 The file it leaves behind is a valid STEP model — 428 entities, 19178 bytes,
 opening with `ISO-10303-21;` and closing with `END-ISO-10303-21;` — which you
 can load in any CAD application that reads STEP.
+
+## Development
+
+CI runs in a `fedora:44` container. You can reproduce it locally in the same
+image with Docker, which is much faster than waiting on a hosted runner because
+everything expensive is cached in Docker volumes between runs:
+
+```sh
+./scripts/ci-local.sh test      # the CI `test` job: fmt, clippy, tests, gates
+./scripts/ci-local.sh occt8     # the CI `occt8-shim` job
+./scripts/ci-local.sh release   # the Flatpak build, unsigned and unpublished
+./scripts/ci-local.sh --help
+```
+
+It never reads your signing key and never pushes anything.
 
 ## License
 

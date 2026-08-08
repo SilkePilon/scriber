@@ -55,9 +55,86 @@ jobs:
             "org.freedesktop.Sdk.Extension.rust-stable//${RUST_BRANCH}"
 
       - name: Import the signing key
+        # GnuPG 2 routes every private-key operation through gpg-agent, and the
+        # agent's only default way to obtain a passphrase is to spawn a pinentry.
+        # fedora:44 ships none, so the agent aborts with "No pinentry" — which is
+        # exactly what killed the first tagged release, at the `ostree commit
+        # --gpg-sign` flatpak-builder runs at the very end of the build.
+        #
+        # Measured in fedora:44 with the package set installed above; the
+        # operation is `ostree commit --gpg-sign`, i.e. what flatpak-builder does
+        # internally:
+        #
+        #   secret key    gpg config                     result
+        #   unprotected   stock                          signs
+        #   protected     stock                          "GPG Agent: No pinentry"
+        #   protected     loopback only                  "GPGME: General error"
+        #   protected     loopback + preset passphrase   signs
+        #
+        # So loopback on its own does NOT rescue a passphrase-protected key: the
+        # agent still has no passphrase, it just fails differently. The passphrase
+        # has to be handed to the agent up front, which is what
+        # gpg-preset-passphrase does. Set the FLATPAK_GPG_PASSPHRASE secret if the
+        # key is protected; leave it unset if it is not.
+        #
+        # The `pinentry` package is deliberately NOT installed: it fixes nothing
+        # here. /usr/bin/pinentry is pinentry-curses, which wants a TTY this job
+        # does not have, and with it installed the protected-key failures above
+        # merely become "Pinentry: Inappropriate ioctl for device". Every
+        # configuration that signs successfully does so with no pinentry present.
+        # Please do not "fix" this by adding the package.
         env:
           KEY: ${{ secrets.FLATPAK_GPG_KEY }}
-        run: echo "$KEY" | base64 -d | gpg --batch --import
+          PASSPHRASE: ${{ secrets.FLATPAK_GPG_PASSPHRASE }}
+          GPG_KEYID: ${{ secrets.FLATPAK_GPG_KEYID }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+
+          # The TTLs have to outlast the whole build: the signing happens at the
+          # end of it, and a cache expiry would drop us straight back into
+          # needing a pinentry.
+          cat > ~/.gnupg/gpg-agent.conf <<'CONF'
+          allow-loopback-pinentry
+          allow-preset-passphrase
+          default-cache-ttl 86400
+          max-cache-ttl 86400
+          CONF
+
+          cat > ~/.gnupg/gpg.conf <<'CONF'
+          pinentry-mode loopback
+          batch
+          no-tty
+          CONF
+
+          # Must happen before the import, so the agent picks the config up.
+          gpgconf --kill gpg-agent
+
+          echo "$KEY" | base64 -d | gpg --batch --import
+
+          if [ -n "${PASSPHRASE:-}" ]; then
+            gpg-connect-agent /bye >/dev/null
+            LIBEXEC=$(gpgconf --list-dirs libexecdir)
+            # Every keygrip in the keyring, rather than just the one GPG_KEYID
+            # names: the signature is made by the signing subkey, which is a
+            # different keygrip from the primary key.
+            for grip in $(gpg --batch --with-colons --with-keygrip \
+                --list-secret-keys | awk -F: '/^grp:/{print $10}'); do
+              printf '%s' "$PASSPHRASE" | "$LIBEXEC/gpg-preset-passphrase" --preset "$grip"
+            done
+          fi
+
+          # Prove the agent can actually produce a signature now, instead of
+          # discovering it cannot forty minutes later once OCCT has finished
+          # compiling. This asserts nothing about the artifact; it only fails the
+          # same failure earlier.
+          if ! echo preflight | gpg --batch --yes --local-user "$GPG_KEYID" \
+              --sign --output /dev/null; then
+            echo "The signing key cannot produce a signature in this job." >&2
+            echo "If the key is passphrase-protected, set the" >&2
+            echo "FLATPAK_GPG_PASSPHRASE secret. See the comment on this step." >&2
+            exit 1
+          fi
 
       - name: Fetch the existing repository
         # Keeps history so users receive deltas rather than full redownloads.
@@ -95,13 +172,22 @@ jobs:
         # Nothing else between the build and the upload executes the artifact.
         # CYLINDRICAL_SURFACE proves the boolean actually ran, rather than an
         # uncut block having been exported.
+        #
+        # Both assertions run INSIDE the sandbox, and have to. `flatpak-builder
+        # --run` gives the sandbox a private /tmp: measured in fedora:44, a file
+        # written to /tmp in there does not exist outside it. Reading the output
+        # back from this job's shell — which is what this step used to do —
+        # therefore fails on a missing file however good the artifact is. This
+        # step had never executed before, because the release died at signing.
         run: |
           set -euo pipefail
           flatpak-builder --run build-dir \
             build-aux/io.github.SilkePilon.Scriber.yaml \
-            scriber smoke --output /tmp/release-check.step
-          head -c 13 /tmp/release-check.step | grep -q 'ISO-10303-21;'
-          grep -q 'CYLINDRICAL_SURFACE' /tmp/release-check.step
+            sh -euc '
+              scriber smoke --output /tmp/release-check.step
+              head -c 13 /tmp/release-check.step | grep -q "ISO-10303-21;"
+              grep -q "CYLINDRICAL_SURFACE" /tmp/release-check.step
+            '
 
       - name: Update repository metadata and generate deltas
         env:
