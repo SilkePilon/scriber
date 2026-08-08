@@ -1,0 +1,17 @@
+[package]
+name = "scriber-lang"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Scriber document language: lexer, parser, typed AST, and evaluator."
+
+[dependencies]
+rowan.workspace = true
+logos.workspace = true
+codespan-reporting.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+insta.workspace = true
