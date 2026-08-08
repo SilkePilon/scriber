@@ -1,0 +1,12 @@
+[package]
+name = "scriber-kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cxx.workspace = true
+scriber-occt = { path = "../scriber-occt", version = "0.1.0" }
+thiserror.workspace = true

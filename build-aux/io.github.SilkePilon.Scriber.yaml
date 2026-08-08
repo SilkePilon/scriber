@@ -1,0 +1,67 @@
+id: io.github.SilkePilon.Scriber
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: scriber
+
+# Local-only by design: no network, no host filesystem beyond user documents.
+finish-args:
+  - --filesystem=xdg-documents
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/scriber/cargo
+    OCCT_ROOT: /app
+
+modules:
+  # Built as a shared library so the Open CASCADE LGPL exception applies.
+  - name: opencascade
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_LIBRARY_TYPE=Shared
+      - -DBUILD_MODULE_Draw=OFF
+      - -DBUILD_MODULE_Visualization=OFF
+      - -DBUILD_MODULE_ApplicationFramework=OFF
+      - -DUSE_FREETYPE=OFF
+      - -DUSE_TK=OFF
+    sources:
+      - type: archive
+        url: https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/V8_0_1.tar.gz
+        sha256: 0d6913eae4bcc09a3653ceced6dda1aec11c35a1513d4c06762c9b002092c68a
+
+  - name: scriber
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo build --release --offline --bin scriber
+      - install -Dm755 target/release/scriber /app/bin/scriber
+    sources:
+      - type: dir
+        path: ..
+        # `type: dir` does not honour .gitignore, so exclude the build output
+        # and history explicitly — otherwise every build copies hundreds of
+        # megabytes of target/ and .git into the sandbox.
+        skip:
+          - target
+          - .git
+          - .superpowers
+          - build-dir
+          - .flatpak-builder
+          - repo
+      - cargo-sources.json
+
+# Applied after every module is built, so OCCT's headers are still available
+# while scriber compiles against them and only the shipped tree is trimmed.
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - /share/opencascade/resources/DrawResources
+  - '*.a'
+  - '*.la'

@@ -1,0 +1,15 @@
+[package]
+name = "scriber-occt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal cxx bridge to OpenCASCADE Technology. Written for Scriber; not derived from any other binding."
+links = "occt"
+
+[dependencies]
+cxx.workspace = true
+
+[build-dependencies]
+cxx-build.workspace = true

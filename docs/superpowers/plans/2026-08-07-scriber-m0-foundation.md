@@ -16,7 +16,7 @@
 - All `unsafe` and all C++ lives in `scriber-occt`. No other crate may declare `unsafe` in this milestone.
 - Application license is **MIT OR Apache-2.0**. Every crate carries this in its `Cargo.toml`.
 - Required attribution, verbatim, in README and About: *"This software makes use of and is based on facilities provided by the Open CASCADE Technology software."*
-- Application ID is `io.github.OWNER.Scriber`. `OWNER` is a literal placeholder; the implementer must replace every occurrence with the actual GitHub account name before Task 7.
+- Application ID is `io.github.SilkePilon.Scriber`. This plan was drafted with `OWNER` as a literal placeholder for the GitHub account name; that placeholder has since been resolved to `SilkePilon` throughout, so the IDs, paths and URLs below can be used verbatim.
 - Every dependency is pinned to an exact version or commit hash. No floating version ranges beyond Cargo's default caret on published crates.
 - Commit after every task. Never commit a failing test suite.
 
@@ -38,7 +38,7 @@
 | `crates/scriber-kernel/src/lib.rs` | Safe Rust API — `Solid` and its operations |
 | `crates/scriber-kernel/src/error.rs` | Kernel error type |
 | `crates/scriber-cli/src/main.rs` | CLI entry point |
-| `build-aux/io.github.OWNER.Scriber.yaml` | Flatpak manifest, including the OCCT module |
+| `build-aux/io.github.SilkePilon.Scriber.yaml` | Flatpak manifest, including the OCCT module |
 | `.github/workflows/ci.yml` | Build, test, clippy, and the dynamic-linking assertion |
 | `.github/workflows/release.yml` | Tag-triggered Flatpak build, sign, publish to Pages |
 
@@ -76,7 +76,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/OWNER/scriber"
+repository = "https://github.com/SilkePilon/scriber"
 
 [workspace.dependencies]
 cxx = "1.0.130"
@@ -268,7 +268,13 @@ Create `crates/scriber-occt/src/shim.hpp`:
 #pragma once
 
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
+#include <Standard_Failure.hxx>
+#include <Standard_Type.hxx>
+#include <Standard_Version.hxx>
 #include <TopoDS_Shape.hxx>
 
 #include "rust/cxx.h"
@@ -280,6 +286,53 @@ namespace scriber {
 struct Shape {
   TopoDS_Shape inner;
 };
+
+// OCCT signals failure by raising Standard_Failure, which derives from
+// Standard_Transient and NOT from std::exception. cxx's generated catch
+// handler only looks for std::exception, so an untranslated OCCT failure
+// would unwind straight through an extern "C" frame and abort the process.
+//
+// Every shim function that calls into OCCT must route through this guard so
+// the failure arrives in Rust as an Err instead of terminating.
+template <typename Body>
+auto guard(Body &&body) -> decltype(body()) {
+  try {
+    return std::forward<Body>(body)();
+  } catch (const Standard_Failure &failure) {
+    // The accessor for the exception's class name moved between OCCT
+    // generations, and we develop on 7.9.3 while shipping 8.0.1 — so both
+    // branches have to compile. 7.x carries RTTI from its Standard_Transient
+    // base; 8.0 dropped that base (Standard_Failure now derives from
+    // std::exception) and exposes ExceptionType() instead. Print() does exist
+    // in both, but it prefixes a raw pointer address, which has no place in a
+    // message a user reads.
+#if OCC_VERSION_MAJOR >= 8
+    const char *kind = failure.ExceptionType();
+#else
+    const char *kind = failure.DynamicType()->Name();
+#endif
+    std::string text =
+        (kind != nullptr && *kind != '\0') ? kind : "Standard_Failure";
+
+    const char *message = failure.GetMessageString();
+    if (message != nullptr && *message != '\0') {
+      text += ": ";
+      text += message;
+    }
+
+    throw std::runtime_error(text);
+  } catch (const std::exception &) {
+    // Shim functions throw std::runtime_error themselves for non-raising
+    // failures (a boolean that reports IsDone() == false, for example).
+    // Rethrow untouched so the specific message survives; cxx converts it.
+    throw;
+  } catch (...) {
+    // OCCT's hierarchy is rooted at Standard_Failure and cxx already handles
+    // std::exception, so reaching here should be impossible. Catching anyway
+    // costs nothing and keeps a stray throw from aborting the process.
+    throw std::runtime_error("unknown C++ exception from OpenCASCADE");
+  }
+}
 
 std::unique_ptr<Shape> make_box(double dx, double dy, double dz);
 
@@ -302,19 +355,26 @@ Create `crates/scriber-occt/src/shim.cpp`:
 namespace scriber {
 
 std::unique_ptr<Shape> make_box(double dx, double dy, double dz) {
-  BRepPrimAPI_MakeBox builder(dx, dy, dz);
-  builder.Build();
-  return std::make_unique<Shape>(Shape{builder.Shape()});
+  return guard([&] {
+    BRepPrimAPI_MakeBox builder(dx, dy, dz);
+    return std::make_unique<Shape>(Shape{builder.Shape()});
+  });
 }
 
 double volume(const Shape &shape) {
-  GProp_GProps props;
-  BRepGProp::VolumeProperties(shape.inner, props);
-  return props.Mass();
+  return guard([&] {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape.inner, props);
+    return props.Mass();
+  });
 }
 
 }  // namespace scriber
 ```
+
+`BRepPrimAPI_MakeBox` raises `Standard_DomainError` for a zero or negative
+extent, and `.Shape()` raises `StdFail_NotDone` when the build failed. Both now
+arrive in Rust as `Err` rather than aborting.
 
 The include path `scriber-occt/src/shim.hpp` is the path cxx generates; it is relative to the crate's parent directory, not the filesystem root.
 
@@ -337,10 +397,10 @@ pub mod ffi {
         type Shape;
 
         /// An axis-aligned box with one corner at the origin.
-        fn make_box(dx: f64, dy: f64, dz: f64) -> UniquePtr<Shape>;
+        fn make_box(dx: f64, dy: f64, dz: f64) -> Result<UniquePtr<Shape>>;
 
         /// Enclosed volume of a solid, in model units cubed.
-        fn volume(shape: &Shape) -> f64;
+        fn volume(shape: &Shape) -> Result<f64>;
     }
 }
 
@@ -350,15 +410,34 @@ mod tests {
 
     #[test]
     fn box_has_expected_volume() {
-        let shape = ffi::make_box(2.0, 3.0, 4.0);
-        let volume = ffi::volume(&shape);
+        let shape = ffi::make_box(2.0, 3.0, 4.0).expect("box builds");
+        let volume = ffi::volume(&shape).expect("volume computes");
         assert!(
             (volume - 24.0).abs() < 1e-9,
             "expected volume 24.0, got {volume}"
         );
     }
+
+    #[test]
+    fn degenerate_box_is_an_error_not_a_crash() {
+        // OCCT raises Standard_DomainError here. If the shim's guard were
+        // missing, this would abort the test process instead of returning Err.
+        let error = ffi::make_box(0.0, 1.0, 1.0)
+            .err()
+            .expect("expected a zero-width box to be rejected");
+
+        // Pin the class name too, so a regression to a generic message is caught.
+        assert!(
+            error.what().contains("Standard_DomainError"),
+            "expected the OCCT exception class in the message, got: {}",
+            error.what()
+        );
+    }
 }
 ```
+
+Every function in this bridge returns `Result`. cxx generates the try/catch that
+converts the `std::runtime_error` thrown by `guard` into a Rust `Err`.
 
 - [ ] **Step 7: Write the build script**
 
@@ -435,7 +514,7 @@ fn main() {
 - [ ] **Step 8: Run the test**
 
 Run: `cargo test -p scriber-occt`
-Expected: PASS, `test tests::box_has_expected_volume ... ok`
+Expected: PASS, 2 tests — `box_has_expected_volume` and `degenerate_box_is_an_error_not_a_crash`
 
 If linking fails with an undefined symbol, find the toolkit that defines it and add it to `OCCT_TOOLKITS`:
 
@@ -473,15 +552,15 @@ Add to the `tests` module in `crates/scriber-occt/src/lib.rs`:
     #[test]
     fn cut_removes_the_tool_volume() {
         // A 10×10×10 block with a full-height radius-2 cylinder bored out.
-        let block = ffi::make_box(10.0, 10.0, 10.0);
-        let drill = ffi::make_cylinder(2.0, 10.0);
-        let bored = ffi::cut(&block, &drill);
+        let block = ffi::make_box(10.0, 10.0, 10.0).expect("block builds");
+        let drill = ffi::make_cylinder(2.0, 10.0).expect("cylinder builds");
+        let bored = ffi::cut(&block, &drill).expect("cut succeeds");
 
         // The cylinder is centred on the origin corner, so exactly one
         // quarter of it lies inside the block.
         let quarter_cylinder = std::f64::consts::PI * 2.0 * 2.0 * 10.0 / 4.0;
         let expected = 1000.0 - quarter_cylinder;
-        let actual = ffi::volume(&bored);
+        let actual = ffi::volume(&bored).expect("volume computes");
 
         assert!(
             (actual - expected).abs() < 1e-6,
@@ -518,17 +597,33 @@ And add these functions inside `namespace scriber`:
 
 ```cpp
 std::unique_ptr<Shape> make_cylinder(double radius, double height) {
-  BRepPrimAPI_MakeCylinder builder(radius, height);
-  builder.Build();
-  return std::make_unique<Shape>(Shape{builder.Shape()});
+  return guard([&] {
+    BRepPrimAPI_MakeCylinder builder(radius, height);
+    return std::make_unique<Shape>(Shape{builder.Shape()});
+  });
 }
 
 std::unique_ptr<Shape> cut(const Shape &target, const Shape &tool) {
-  BRepAlgoAPI_Cut op(target.inner, tool.inner);
-  op.Build();
-  return std::make_unique<Shape>(Shape{op.Shape()});
+  return guard([&] {
+    // The constructor already runs the operation. Calling Build() again would
+    // clear and re-run the whole DS filler, doubling the cost of every cut.
+    BRepAlgoAPI_Cut op(target.inner, tool.inner);
+
+    if (!op.IsDone()) {
+      throw std::runtime_error("boolean cut failed");
+    }
+
+    // IsDone() only means the algorithm ran; subtracting a larger solid
+    // succeeds and yields an empty compound. Detecting that is the kernel
+    // layer's job (Error::EmptyResult), not the bridge's.
+    return std::make_unique<Shape>(Shape{op.Shape()});
+  });
 }
 ```
+
+Unlike the primitive builders, `BRepAlgoAPI_Cut` reports failure through
+`IsDone()` rather than always raising, so it is checked explicitly. Both paths
+end up as an `Err` in Rust.
 
 - [ ] **Step 5: Declare them in the bridge**
 
@@ -536,16 +631,16 @@ In `crates/scriber-occt/src/lib.rs`, add inside `unsafe extern "C++"`:
 
 ```rust
         /// A cylinder whose axis runs along +Z with its base at the origin.
-        fn make_cylinder(radius: f64, height: f64) -> UniquePtr<Shape>;
+        fn make_cylinder(radius: f64, height: f64) -> Result<UniquePtr<Shape>>;
 
         /// Boolean subtraction: `target` with `tool` removed.
-        fn cut(target: &Shape, tool: &Shape) -> UniquePtr<Shape>;
+        fn cut(target: &Shape, tool: &Shape) -> Result<UniquePtr<Shape>>;
 ```
 
 - [ ] **Step 6: Run the tests**
 
 Run: `cargo test -p scriber-occt`
-Expected: PASS, both tests green
+Expected: PASS, 3 tests green
 
 - [ ] **Step 7: Commit**
 
@@ -565,7 +660,7 @@ git commit -m "feat(occt): add cylinder primitive and boolean cut"
 
 **Interfaces:**
 - Consumes: `ffi::Shape`, `ffi::make_box` from Task 2.
-- Produces: `ffi::write_step(shape: &Shape, path: &str) -> bool` — returns `false` on any OCCT failure.
+- Produces: `ffi::write_step(shape: &Shape, path: &str) -> Result<()>` — `Err` on any OCCT failure, carrying OCCT's own message where it has one.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -574,11 +669,11 @@ Add to the `tests` module in `crates/scriber-occt/src/lib.rs`:
 ```rust
     #[test]
     fn write_step_produces_a_valid_header() {
-        let shape = ffi::make_box(1.0, 1.0, 1.0);
+        let shape = ffi::make_box(1.0, 1.0, 1.0).expect("box builds");
         let path = std::env::temp_dir().join("scriber_occt_write_step.step");
         let path_str = path.to_str().expect("temp path is valid UTF-8");
 
-        assert!(ffi::write_step(&shape, path_str), "write_step reported failure");
+        ffi::write_step(&shape, path_str).expect("write_step succeeds");
 
         let contents = std::fs::read_to_string(&path).expect("STEP file is readable");
         assert!(
@@ -602,7 +697,7 @@ Expected: FAIL to compile — `cannot find function 'write_step' in module 'ffi'
 In `crates/scriber-occt/src/shim.hpp`, add:
 
 ```cpp
-bool write_step(const Shape &shape, rust::Str path);
+void write_step(const Shape &shape, rust::Str path);
 ```
 
 - [ ] **Step 4: Implement it**
@@ -620,32 +715,110 @@ In `crates/scriber-occt/src/shim.cpp`, add these includes:
 And this function inside `namespace scriber`:
 
 ```cpp
-bool write_step(const Shape &shape, rust::Str path) {
-  STEPControl_Writer writer;
+namespace {
 
-  if (writer.Transfer(shape.inner, STEPControl_AsIs) != IFSelect_RetDone) {
-    return false;
+// Symbolic name for the status, so the message does not depend on an integer
+// whose meaning a reader would have to go look up.
+const char *status_name(IFSelect_ReturnStatus status) {
+  switch (status) {
+    case IFSelect_RetVoid:
+      return "IFSelect_RetVoid";
+    case IFSelect_RetDone:
+      return "IFSelect_RetDone";
+    case IFSelect_RetError:
+      return "IFSelect_RetError";
+    case IFSelect_RetFail:
+      return "IFSelect_RetFail";
+    case IFSelect_RetStop:
+      return "IFSelect_RetStop";
   }
 
-  // rust::Str is not null-terminated, so copy before handing to OCCT.
-  const std::string target(path.data(), path.size());
-  return writer.Write(target.c_str()) == IFSelect_RetDone;
+  return "IFSelect_Ret<unknown>";
+}
+
+}  // namespace
+
+void write_step(const Shape &shape, rust::Str path) {
+  guard([&] {
+    STEPControl_Writer writer;
+
+    // OCCT reports the useful detail to its own messenger, never through the
+    // exception, so the status is all we can hand back. It becomes the
+    // `reason` in Task 5's Error::StepWriteFailed. The path is deliberately
+    // NOT included — Rust already knows it and would print it twice.
+    const IFSelect_ReturnStatus transferred =
+        writer.Transfer(shape.inner, STEPControl_AsIs);
+    if (transferred != IFSelect_RetDone) {
+      throw std::runtime_error(std::string("STEP transfer failed (") +
+                               status_name(transferred) + ")");
+    }
+
+    // rust::Str is not null-terminated, so copy before handing to OCCT.
+    const std::string target(path.data(), path.size());
+
+    const IFSelect_ReturnStatus written = writer.Write(target.c_str());
+    if (written != IFSelect_RetDone) {
+      throw std::runtime_error(std::string("STEP write failed (") +
+                               status_name(written) + ")");
+    }
+  });
 }
 ```
+
+**Silencing OCCT's console output.** OCCT's default messenger prints to stdout —
+a transfer banner on every write, and diagnostics from other subsystems. A CLI
+owns its stdout, so the printers are removed once, eagerly, from the top of
+*every* shim entry point rather than lazily inside `write_step`. Doing it lazily
+would let kernel chatter escape during the `make_box`/`cut` calls that precede
+the first write. Because it lives in the header, its declarations must be
+visible to every translation unit that includes `shim.hpp` — including the
+bridge file cxx generates — so the messenger headers belong in `shim.hpp`, not
+in `shim.cpp`. Add to the include block of `crates/scriber-occt/src/shim.hpp`:
+
+```cpp
+#include <Message.hxx>
+#include <Message_Messenger.hxx>
+#include <Message_PrinterOStream.hxx>
+```
+
+`STANDARD_TYPE()` needs `Standard_Type.hxx`, which the header already includes
+for the `DynamicType()->Name()` path in `guard()`.
+
+Then add, inside `namespace scriber`, above `guard()`:
+
+```cpp
+// Drops OCCT's console printers the first time any shim function runs, so
+// kernel diagnostics never land on stdout. The function-local static makes
+// this thread-safe and once-only under C++11 and later.
+inline void silence_kernel_console() {
+  static const bool done = [] {
+    Message::DefaultMessenger()->RemovePrinters(
+        STANDARD_TYPE(Message_PrinterOStream));
+    return true;
+  }();
+  (void)done;
+}
+```
+
+Call `silence_kernel_console();` as the first statement of `make_box`,
+`make_cylinder`, `cut`, `volume`, and `write_step`.
+
+`guard()` deduces a `void` return here, which is well-formed — do not add a
+dummy return value.
 
 - [ ] **Step 5: Declare it in the bridge**
 
 In `crates/scriber-occt/src/lib.rs`, add inside `unsafe extern "C++"`:
 
 ```rust
-        /// Writes `shape` to `path` as AP214 STEP. Returns false on failure.
-        fn write_step(shape: &Shape, path: &str) -> bool;
+        /// Writes `shape` to `path` as AP214 STEP.
+        fn write_step(shape: &Shape, path: &str) -> Result<()>;
 ```
 
 - [ ] **Step 6: Run the tests**
 
 Run: `cargo test -p scriber-occt`
-Expected: PASS, all three tests green
+Expected: PASS, all 4 tests green
 
 - [ ] **Step 7: Commit**
 
@@ -666,13 +839,17 @@ git commit -m "feat(occt): add STEP export"
 **Interfaces:**
 - Consumes: `scriber_occt::ffi::{Shape, make_box, make_cylinder, cut, volume, write_step}`.
 - Produces:
-  - `scriber_kernel::Error` — enum with variants `StepWriteFailed { path: PathBuf }` and `EmptyResult`.
+  - `scriber_kernel::Error` — enum with variants `InvalidDimension { name: &'static str, value: f64 }`, `Kernel(String)`, `StepWriteFailed { path: PathBuf, reason: String }`, and `EmptyResult`, plus `From<cxx::Exception>`.
   - `scriber_kernel::Solid` with:
-    - `Solid::cuboid(dx: f64, dy: f64, dz: f64) -> Solid`
-    - `Solid::cylinder(radius: f64, height: f64) -> Solid`
+    - `Solid::cuboid(dx: f64, dy: f64, dz: f64) -> Result<Solid, Error>`
+    - `Solid::cylinder(radius: f64, height: f64) -> Result<Solid, Error>`
     - `Solid::cut(&self, tool: &Solid) -> Result<Solid, Error>`
-    - `Solid::volume(&self) -> f64`
+    - `Solid::volume(&self) -> Result<f64, Error>`
     - `Solid::write_step(&self, path: impl AsRef<Path>) -> Result<(), Error>`
+
+Every constructor and query returns `Result` because the bridge beneath can fail
+— OCCT rejects degenerate inputs, and booleans can fail internally. This is what
+makes the "safe API" claim actually true.
 
 `Solid` is deliberately not `Sync`. In later milestones all kernel work happens on one dedicated thread, and this type must not accidentally escape it.
 
@@ -700,22 +877,75 @@ mod tests {
 
     #[test]
     fn cuboid_reports_its_volume() {
-        let solid = Solid::cuboid(2.0, 3.0, 4.0);
-        assert!((solid.volume() - 24.0).abs() < 1e-9);
+        let solid = Solid::cuboid(2.0, 3.0, 4.0).expect("cuboid builds");
+        assert!((solid.volume().expect("volume computes") - 24.0).abs() < 1e-9);
     }
 
     #[test]
     fn cutting_reduces_volume() {
-        let block = Solid::cuboid(10.0, 10.0, 10.0);
-        let drill = Solid::cylinder(2.0, 10.0);
+        let block = Solid::cuboid(10.0, 10.0, 10.0).expect("block builds");
+        let drill = Solid::cylinder(2.0, 10.0).expect("cylinder builds");
         let bored = block.cut(&drill).expect("cut succeeds");
-        assert!(bored.volume() < block.volume());
+
+        // Pin the exact analytic value, not merely "smaller" — a cut that
+        // silently did nothing would still be smaller than nothing at all.
+        let expected = 1000.0 - std::f64::consts::PI * 2.0 * 2.0 * 10.0 / 4.0;
+        let actual = bored.volume().expect("bored volume computes");
+        assert!((actual - expected).abs() < 1e-6, "expected {expected}, got {actual}");
+    }
+
+    #[test]
+    fn sub_tolerance_dimensions_are_rejected() {
+        // Positive and finite, but below OCCT's confusion tolerance, so the
+        // kernel would return Ok with geometry it considers degenerate.
+        let err = Solid::cylinder(1e-12, 1.0).expect_err("must be rejected");
+        assert!(
+            matches!(err, Error::InvalidDimension { name: "radius", .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cutting_away_everything_reports_an_empty_result() {
+        let small = Solid::cuboid(1.0, 1.0, 1.0).expect("small builds");
+        let large = Solid::cuboid(10.0, 10.0, 10.0).expect("large builds");
+
+        let err = small.cut(&large).expect_err("must report an empty result");
+        assert!(matches!(err, Error::EmptyResult), "got {err:?}");
+    }
+
+    #[test]
+    fn degenerate_cuboid_is_rejected() {
+        let err = Solid::cuboid(0.0, 1.0, 1.0).expect_err("must be rejected");
+        assert!(
+            matches!(err, Error::InvalidDimension { name: "dx", .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn negative_and_nan_cylinder_dimensions_are_rejected() {
+        // OCCT accepts a zero radius and defers a negative height to a later
+        // volume query, so these must be caught here rather than in the kernel.
+        for (radius, height, expected) in
+            [(-1.0, 10.0, "radius"), (0.0, 10.0, "radius"), (1.0, f64::NAN, "height")]
+        {
+            let Err(err) = Solid::cylinder(radius, height) else {
+                panic!("must be rejected: r={radius} h={height}");
+            };
+            assert!(
+                matches!(err, Error::InvalidDimension { name, .. } if name == expected),
+                "got {err:?}"
+            );
+        }
     }
 
     #[test]
     fn step_export_writes_a_file() {
-        let solid = Solid::cuboid(1.0, 1.0, 1.0);
-        let path = std::env::temp_dir().join("scriber_kernel_export.step");
+        let solid = Solid::cuboid(1.0, 1.0, 1.0).expect("cuboid builds");
+        let path = std::env::temp_dir()
+            .join(format!("scriber_kernel_export_{}.step", std::process::id()));
+        std::fs::remove_file(&path).ok();
 
         solid.write_step(&path).expect("export succeeds");
         assert!(path.metadata().expect("file exists").len() > 0);
@@ -725,7 +955,7 @@ mod tests {
 
     #[test]
     fn step_export_reports_an_unwritable_path() {
-        let solid = Solid::cuboid(1.0, 1.0, 1.0);
+        let solid = Solid::cuboid(1.0, 1.0, 1.0).expect("cuboid builds");
         let err = solid
             .write_step("/nonexistent-directory/model.step")
             .expect_err("export must fail");
@@ -749,13 +979,33 @@ use std::path::PathBuf;
 /// Errors produced by geometry operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// A dimension was not a usable finite length.
+    ///
+    /// OCCT does not reliably reject these — `make_cylinder(0.0, 1.0)` returns
+    /// a valid-looking shape of zero volume, a negative height only fails
+    /// later during a volume query, and anything below OCCT's confusion
+    /// tolerance yields geometry the kernel treats as degenerate without
+    /// reporting an error. We validate at the boundary instead.
+    #[error("{name} must be finite and at least 1e-7, got {value}")]
+    InvalidDimension { name: &'static str, value: f64 },
+
+    /// OCCT raised a failure. Carries the kernel's own message.
+    #[error("geometry kernel error: {0}")]
+    Kernel(String),
+
     /// OCCT declined to write the STEP file.
-    #[error("failed to write STEP file to {path}")]
-    StepWriteFailed { path: PathBuf },
+    #[error("failed to write STEP file to {path}: {reason}")]
+    StepWriteFailed { path: PathBuf, reason: String },
 
     /// A boolean operation produced no geometry.
     #[error("operation produced an empty result")]
     EmptyResult,
+}
+
+impl From<cxx::Exception> for Error {
+    fn from(exception: cxx::Exception) -> Self {
+        Error::Kernel(exception.what().to_owned())
+    }
 }
 ```
 
@@ -785,26 +1035,41 @@ pub struct Solid {
     _not_sync: PhantomData<Rc<()>>,
 }
 
+// `ffi::Shape` is opaque, so Debug cannot be derived — but Result::expect_err
+// in the tests requires the Ok type to be Debug.
+impl std::fmt::Debug for Solid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Solid { .. }")
+    }
+}
+
 impl Solid {
     fn from_raw(inner: UniquePtr<ffi::Shape>) -> Self {
         Self { inner, _not_sync: PhantomData }
     }
 
     /// An axis-aligned box with one corner at the origin.
-    pub fn cuboid(dx: f64, dy: f64, dz: f64) -> Self {
-        Self::from_raw(ffi::make_box(dx, dy, dz))
+    pub fn cuboid(dx: f64, dy: f64, dz: f64) -> Result<Self, Error> {
+        check_extent("dx", dx)?;
+        check_extent("dy", dy)?;
+        check_extent("dz", dz)?;
+
+        Ok(Self::from_raw(ffi::make_box(dx, dy, dz)?))
     }
 
     /// A cylinder whose axis runs along +Z with its base at the origin.
-    pub fn cylinder(radius: f64, height: f64) -> Self {
-        Self::from_raw(ffi::make_cylinder(radius, height))
+    pub fn cylinder(radius: f64, height: f64) -> Result<Self, Error> {
+        check_extent("radius", radius)?;
+        check_extent("height", height)?;
+
+        Ok(Self::from_raw(ffi::make_cylinder(radius, height)?))
     }
 
     /// This solid with `tool` subtracted from it.
     pub fn cut(&self, tool: &Solid) -> Result<Self, Error> {
-        let result = Self::from_raw(ffi::cut(&self.inner, &tool.inner));
+        let result = Self::from_raw(ffi::cut(&self.inner, &tool.inner)?);
 
-        if result.volume() <= 0.0 {
+        if result.volume()? <= 0.0 {
             return Err(Error::EmptyResult);
         }
 
@@ -812,8 +1077,8 @@ impl Solid {
     }
 
     /// Enclosed volume, in model units cubed.
-    pub fn volume(&self) -> f64 {
-        ffi::volume(&self.inner)
+    pub fn volume(&self) -> Result<f64, Error> {
+        Ok(ffi::volume(&self.inner)?)
     }
 
     /// Writes this solid to `path` as a STEP file.
@@ -821,14 +1086,32 @@ impl Solid {
         let path = path.as_ref();
         let as_str = path.to_str().ok_or_else(|| Error::StepWriteFailed {
             path: path.to_path_buf(),
+            reason: "path is not valid UTF-8".to_owned(),
         })?;
 
-        if ffi::write_step(&self.inner, as_str) {
-            Ok(())
-        } else {
-            Err(Error::StepWriteFailed { path: path.to_path_buf() })
-        }
+        // Keep OCCT's own message — it is the only clue about why a write failed.
+        ffi::write_step(&self.inner, as_str).map_err(|exception| Error::StepWriteFailed {
+            path: path.to_path_buf(),
+            reason: exception.what().to_owned(),
+        })
     }
+}
+
+/// Smallest extent we accept.
+///
+/// Matches OCCT's `Precision::Confusion()`. Below this the kernel treats two
+/// points as coincident, so it will happily build a "solid" it also considers
+/// degenerate — returning Ok with an essentially zero volume rather than an
+/// error. Rejecting here is what keeps that out of the API.
+const MIN_EXTENT: f64 = 1e-7;
+
+/// Rejects dimensions OCCT would accept but should not.
+fn check_extent(name: &'static str, value: f64) -> Result<(), Error> {
+    if !value.is_finite() || value < MIN_EXTENT {
+        return Err(Error::InvalidDimension { name, value });
+    }
+
+    Ok(())
 }
 
 /// Returns the crate's semantic version, used to stamp exported files.
@@ -842,7 +1125,7 @@ Add `cxx.workspace = true` to `[dependencies]` in `crates/scriber-kernel/Cargo.t
 - [ ] **Step 6: Run the tests**
 
 Run: `cargo test -p scriber-kernel`
-Expected: PASS, all five tests green
+Expected: PASS, all 9 tests green
 
 - [ ] **Step 7: Check lints**
 
@@ -929,7 +1212,9 @@ fn smoke_command_writes_a_step_file() {
     assert!(contents.starts_with("ISO-10303-21;"));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("volume"), "stdout was: {stdout}");
+    // Pin the value, not just the label: a boolean that silently did nothing
+    // would print 1000.0000 and still contain the word "volume".
+    assert!(stdout.contains("968.5841"), "stdout was: {stdout}");
 
     std::fs::remove_file(&output_path).ok();
 }
@@ -947,7 +1232,10 @@ Create `crates/scriber-cli/src/main.rs`:
 ```rust
 //! Headless entry point for Scriber.
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use clap::{Parser, Subcommand};
 use scriber_kernel::Solid;
@@ -983,14 +1271,17 @@ fn main() -> ExitCode {
     }
 }
 
-fn smoke(output: &PathBuf) -> Result<(), scriber_kernel::Error> {
-    let block = Solid::cuboid(10.0, 10.0, 10.0);
-    let drill = Solid::cylinder(2.0, 10.0);
+fn smoke(output: &Path) -> Result<(), scriber_kernel::Error> {
+    let block = Solid::cuboid(10.0, 10.0, 10.0)?;
+    let drill = Solid::cylinder(2.0, 10.0)?;
     let bored = block.cut(&drill)?;
 
+    // Query the volume before writing, so a failure here cannot leave a
+    // half-finished file behind.
+    let volume = bored.volume()?;
     bored.write_step(output)?;
 
-    println!("wrote {} — volume {:.4}", output.display(), bored.volume());
+    println!("wrote {} — volume {volume:.4}", output.display());
 
     Ok(())
 }
@@ -1022,7 +1313,7 @@ git commit -m "feat(cli): add smoke command proving the kernel end to end"
 ### Task 7: Flatpak packaging
 
 **Files:**
-- Create: `build-aux/io.github.OWNER.Scriber.yaml`
+- Create: `build-aux/io.github.SilkePilon.Scriber.yaml`
 - Create: `build-aux/cargo-sources.json` (generated, committed)
 - Create: `scripts/check-dynamic-occt.sh`
 
@@ -1030,26 +1321,28 @@ git commit -m "feat(cli): add smoke command proving the kernel end to end"
 - Consumes: the `scriber` binary from Task 6.
 - Produces: a Flatpak bundle containing `/app/bin/scriber`, dynamically linked against OCCT 8.0.1.
 
-Replace every `OWNER` below with the real GitHub account name before starting.
+The `OWNER` placeholder used while drafting is already resolved below to the real GitHub account name, `SilkePilon`; nothing needs substituting before starting.
 
 - [ ] **Step 1: Install the Flatpak toolchain and runtime**
 
 ```bash
-sudo dnf install -y flatpak flatpak-builder
 flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak install -y flathub org.gnome.Platform//49 org.gnome.Sdk//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
+flatpak install -y flathub org.gnome.Platform//50 org.gnome.Sdk//50 org.freedesktop.Sdk.Extension.rust-stable//25.08
 ```
 
-The GNOME 49 runtime is the current supported branch; GNOME 48 reached end of life on 2026-03-24.
+GNOME 50 is the current supported branch (48 reached end of life on 2026-03-24,
+and 49 remains supported). On the development machine `flatpak-builder`,
+`org.gnome.Platform//50`, `org.gnome.Sdk//50` and `rust-stable//25.08` are
+already installed, so this step is a no-op there.
 
 - [ ] **Step 2: Write the manifest**
 
-Create `build-aux/io.github.OWNER.Scriber.yaml`:
+Create `build-aux/io.github.SilkePilon.Scriber.yaml`:
 
 ```yaml
-id: io.github.OWNER.Scriber
+id: io.github.SilkePilon.Scriber
 runtime: org.gnome.Platform
-runtime-version: '49'
+runtime-version: '50'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -1093,7 +1386,27 @@ modules:
     sources:
       - type: dir
         path: ..
+        # `type: dir` does not honour .gitignore, so exclude the build output
+        # and history explicitly — otherwise every build copies hundreds of
+        # megabytes of target/ and .git into the sandbox.
+        skip:
+          - target
+          - .git
+          - .superpowers
+          - build-dir
+          - .flatpak-builder
+          - repo
       - cargo-sources.json
+
+# Applied after every module is built, so OCCT's headers are still available
+# while scriber compiles against them and only the shipped tree is trimmed.
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - /share/opencascade/resources/DrawResources
+  - '*.a'
+  - '*.la'
 ```
 
 That checksum was verified against the published `V8_0_1` tarball on 2026-08-07. Confirm it still matches before the first build:
@@ -1112,7 +1425,7 @@ Flatpak builds have no network, so every crate must be declared:
 
 ```bash
 pip install --user aiohttp toml
-curl -fsSL https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py -o /tmp/flatpak-cargo-generator.py
+curl -fsSL https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/737c0085912f9f7dabf9341d4608e2a77a51a73a/cargo/flatpak-cargo-generator.py -o /tmp/flatpak-cargo-generator.py
 python3 /tmp/flatpak-cargo-generator.py Cargo.lock -o build-aux/cargo-sources.json
 ```
 
@@ -1157,7 +1470,7 @@ Expected: `OK: target/debug/scriber dynamically links OCCT.` followed by an inde
 Run:
 
 ```bash
-flatpak-builder --force-clean --repo=/tmp/scriber-repo build-dir build-aux/io.github.OWNER.Scriber.yaml
+flatpak-builder --force-clean --repo=/tmp/scriber-repo build-dir build-aux/io.github.SilkePilon.Scriber.yaml
 ```
 
 Expected: a successful build. OCCT takes a long time to compile the first time; this is normal.
@@ -1165,11 +1478,17 @@ Expected: a successful build. OCCT takes a long time to compile the first time; 
 - [ ] **Step 7: Install and run it**
 
 ```bash
-flatpak-builder --run build-dir build-aux/io.github.OWNER.Scriber.yaml scriber smoke --output /tmp/flatpak-smoke.step
-head -c 13 /tmp/flatpak-smoke.step
+flatpak-builder --run build-dir build-aux/io.github.SilkePilon.Scriber.yaml \
+  scriber smoke --output "$HOME/Documents/flatpak-smoke.step"
+head -c 13 "$HOME/Documents/flatpak-smoke.step"
 ```
 
 Expected: `ISO-10303-21;`
+
+The output path must be one the sandbox shares with the host. `/tmp` is not:
+every Flatpak sandbox gets a private `/tmp`, so `--output /tmp/…` prints a
+success line and leaves nothing behind on the host — the `head` above would then
+fail with "No such file or directory".
 
 - [ ] **Step 8: Commit**
 
@@ -1300,7 +1619,7 @@ jobs:
           flatpak remote-add --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install -y --noninteractive flathub \
-            org.gnome.Platform//49 org.gnome.Sdk//49 \
+            org.gnome.Platform//50 org.gnome.Sdk//50 \
             org.freedesktop.Sdk.Extension.rust-stable//25.08
 
       - name: Import the signing key
@@ -1319,7 +1638,7 @@ jobs:
           flatpak-builder --force-clean --disable-rofiles-fuse \
             --repo=pages/repo \
             --gpg-sign=${{ secrets.FLATPAK_GPG_KEYID }} \
-            build-dir build-aux/io.github.OWNER.Scriber.yaml
+            build-dir build-aux/io.github.SilkePilon.Scriber.yaml
 
       - name: Update repository metadata and generate deltas
         run: |
@@ -1332,20 +1651,20 @@ jobs:
         run: |
           flatpak build-bundle pages/repo \
             "Scriber-${GITHUB_REF_NAME}-x86_64.flatpak" \
-            io.github.OWNER.Scriber \
+            io.github.SilkePilon.Scriber \
             --gpg-sign=${{ secrets.FLATPAK_GPG_KEYID }}
 
       - name: Write the remote definitions
         run: |
           cp scriber.gpg pages/scriber.gpg
           KEY_B64=$(base64 -w0 scriber.gpg)
-          BASE="https://OWNER.github.io/scriber"
+          BASE="https://SilkePilon.github.io/scriber"
 
           cat > pages/scriber.flatpakrepo <<EOF
           [Flatpak Repo]
           Title=Scriber
           Url=${BASE}/repo/
-          Homepage=https://github.com/OWNER/scriber
+          Homepage=https://github.com/SilkePilon/scriber
           Comment=Local-only 3D CAD for GNOME
           GPGKey=${KEY_B64}
           EOF
@@ -1353,7 +1672,7 @@ jobs:
           cat > pages/scriber.flatpakref <<EOF
           [Flatpak Ref]
           Title=Scriber
-          Name=io.github.OWNER.Scriber
+          Name=io.github.SilkePilon.Scriber
           Branch=master
           Url=${BASE}/repo/
           RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
@@ -1392,15 +1711,15 @@ Add the remote once, then install and receive updates like any other app:
 
 ```sh
 flatpak remote-add --if-not-exists scriber \
-  https://OWNER.github.io/scriber/scriber.flatpakrepo
+  https://SilkePilon.github.io/scriber/scriber.flatpakrepo
 
-flatpak install scriber io.github.OWNER.Scriber
+flatpak install scriber io.github.SilkePilon.Scriber
 ```
 
 Or install in one step:
 
 ```sh
-flatpak install https://OWNER.github.io/scriber/scriber.flatpakref
+flatpak install https://SilkePilon.github.io/scriber/scriber.flatpakref
 ```
 
 If you would rather not add a remote, each release has a standalone bundle.
@@ -1427,20 +1746,24 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Expected: the Release workflow succeeds, and `https://OWNER.github.io/scriber/scriber.flatpakrepo` is reachable.
+Expected: the Release workflow succeeds, and `https://SilkePilon.github.io/scriber/scriber.flatpakrepo` is reachable.
 
 - [ ] **Step 7: Verify installation as a user would**
 
 On a machine that has never built Scriber:
 
 ```bash
-flatpak remote-add --if-not-exists scriber https://OWNER.github.io/scriber/scriber.flatpakrepo
-flatpak install -y scriber io.github.OWNER.Scriber
-flatpak run io.github.OWNER.Scriber smoke --output ~/scriber-smoke.step
-head -c 13 ~/scriber-smoke.step
+flatpak remote-add --if-not-exists scriber https://SilkePilon.github.io/scriber/scriber.flatpakrepo
+flatpak install -y scriber io.github.SilkePilon.Scriber
+flatpak run io.github.SilkePilon.Scriber smoke --output ~/Documents/scriber-smoke.step
+head -c 13 ~/Documents/scriber-smoke.step
 ```
 
 Expected: `ISO-10303-21;`
+
+The manifest grants exactly one filesystem permission, `--filesystem=xdg-documents`,
+so `~/Documents` is the only host location the app can write. Writing to `~` or
+`/tmp` instead succeeds *inside* the sandbox and leaves no file on the host.
 
 - [ ] **Step 8: Commit any fixes**
 

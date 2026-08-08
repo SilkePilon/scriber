@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# This job fetches and executes a third-party script, so it gets no more than
+# the read access it needs.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Fedora 44 ships OCCT 7.9.3, matching the documented development
+    # environment. Ubuntu runners carry an OCCT too old for the TKDE* names.
+    container: fedora:44
+    steps:
+      - name: Install build dependencies
+        run: dnf install -y opencascade-devel cmake gcc-c++ git python3 python3-pip
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Assert OCCT is dynamically linked
+        run: |
+          cargo build --bin scriber
+          ./scripts/check-dynamic-occt.sh target/debug/scriber
+
+      - name: Assert the vendored cargo sources are current
+        # Flatpak builds offline, so build-aux/cargo-sources.json must match
+        # Cargo.lock exactly. A stale file fails inside the sandbox with an
+        # opaque "no matching package" error, so catch it here instead.
+        run: |
+          python3 -m venv /tmp/cargo-sources-venv
+          /tmp/cargo-sources-venv/bin/pip install --quiet aiohttp toml tomlkit
+          # Pinned to a commit: this script is downloaded and executed, so a
+          # mutable branch ref would let upstream change what runs here.
+          python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/737c0085912f9f7dabf9341d4608e2a77a51a73a/cargo/flatpak-cargo-generator.py', '/tmp/flatpak-cargo-generator.py')"
+          /tmp/cargo-sources-venv/bin/python /tmp/flatpak-cargo-generator.py \
+            Cargo.lock -o /tmp/cargo-sources.json
+          if ! diff -u build-aux/cargo-sources.json /tmp/cargo-sources.json; then
+            echo "build-aux/cargo-sources.json is stale relative to Cargo.lock." >&2
+            echo "Regenerate it with flatpak-cargo-generator.py and commit the result." >&2
+            exit 1
+          fi
+
+  # The job above builds against Fedora 44's OCCT 7.9.3, but the Flatpak ships
+  # OCCT 8.0.1. That exact pair has already broken this project once: OCCT 8.0
+  # removed Standard_Failure::DynamicType() and reparented the class from
+  # Standard_Transient onto std::exception, which compiled cleanly on 7.9.3 and
+  # failed only inside the Flatpak build. shim.hpp now branches on
+  # OCC_VERSION_MAJOR, so the 8.x half is invisible to a 7.9.3 compiler and
+  # needs its own job to be checked at all.
+  #
+  # WHAT THIS JOB DOES NOT COVER, stated plainly rather than implied: it compiles
+  # against OCCT 8 headers, it does not link or run against OCCT 8. build.rs's
+  # TKDE*/libTK* toolkit names, symbol availability at link time, and the shim's
+  # runtime behaviour on 8.0.1 are exercised only by the release workflow's full
+  # Flatpak build, which does not run until a v* tag is pushed. Closing that gap
+  # means compiling OCCT from source (tens of minutes per run), which is why it
+  # is deliberately not done here.
+  occt8-shim:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install build dependencies
+        run: dnf install -y cmake gcc-c++ git tar gzip
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: 1.97.1
+
+      - name: Compile the shim against the OCCT version the Flatpak ships
+        run: |
+          set -euo pipefail
+          MANIFEST=build-aux/io.github.SilkePilon.Scriber.yaml
+
+          # Read the pin out of the manifest instead of repeating it here, so
+          # this check follows the shipped OCCT automatically when it is bumped
+          # and cannot silently drift into testing a version nobody receives.
+          URL=$(sed -n 's/^ *url: *//p' "$MANIFEST" | head -1)
+          SHA=$(sed -n 's/^ *sha256: *//p' "$MANIFEST" | head -1)
+          case "$URL" in
+            *OCCT*.tar.gz) ;;
+            *)
+              echo "Expected the first manifest source to be the OCCT archive." >&2
+              echo "Got: '$URL'. Update this job alongside the manifest." >&2
+              exit 1
+              ;;
+          esac
+          echo "Checking the shim against $URL"
+
+          curl -fsSL "$URL" -o /tmp/occt.tar.gz
+          echo "${SHA}  /tmp/occt.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/occt-src
+          tar -xzf /tmp/occt.tar.gz -C /tmp/occt-src --strip-components=1
+
+          # CONFIGURE ONLY — this compiles no OCCT code and takes seconds. It
+          # runs because configuring is what generates Standard_Version.hxx (the
+          # header defining OCC_VERSION_MAJOR, which is templated, not checked
+          # in) and collects every public header into include/opencascade. The
+          # flags mirror the manifest's config-opts so the collected header set
+          # is the one that actually ships.
+          cmake -S /tmp/occt-src -B /tmp/occt-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_LIBRARY_TYPE=Shared \
+            -DBUILD_MODULE_Draw=OFF \
+            -DBUILD_MODULE_Visualization=OFF \
+            -DBUILD_MODULE_ApplicationFramework=OFF \
+            -DUSE_FREETYPE=OFF \
+            -DUSE_TK=OFF
+
+          VERSION_HEADER=/tmp/occt-build/include/opencascade/Standard_Version.hxx
+          test -f "$VERSION_HEADER"
+          # Print it, so a version bump is legible in the log rather than
+          # something you have to infer from the manifest diff.
+          grep '^#define OCC_VERSION_COMPLETE' "$VERSION_HEADER"
+
+          # `cargo check` still runs build.rs, and build.rs runs cxx_build, so
+          # shim.cpp — and with it the OCC_VERSION_MAJOR >= 8 branch of shim.hpp
+          # — is compiled in full. Nothing is linked, which is exactly why no
+          # OCCT library has to be built.
+          OCCT_ROOT=/tmp/occt-build cargo check -p scriber-occt

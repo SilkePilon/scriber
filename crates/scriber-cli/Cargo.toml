@@ -1,0 +1,15 @@
+[package]
+name = "scriber-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "scriber"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+scriber-kernel = { path = "../scriber-kernel", version = "0.1.0" }
