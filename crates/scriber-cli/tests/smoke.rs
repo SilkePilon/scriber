@@ -39,9 +39,16 @@ fn smoke_command_writes_a_step_file() {
 
 #[test]
 fn smoke_command_reports_an_unwritable_output_path() {
-    // A directory that cannot exist, so the STEP export has nowhere to land.
+    // A directory that does not exist, so the STEP export has nowhere to land.
+    // Nothing ever creates this directory, so a collision could only come from
+    // a stray leftover — which would trip the fixture assertion below rather
+    // than pass silently. The pid suffix is for consistency with the happy-path
+    // test and to keep that assertion from tripping on someone else's debris.
     let output_path = std::env::temp_dir()
-        .join("scriber_cli_missing_directory")
+        .join(format!(
+            "scriber_cli_missing_directory_{}",
+            std::process::id()
+        ))
         .join("model.step");
     assert!(!output_path.exists(), "fixture path must not exist");
 

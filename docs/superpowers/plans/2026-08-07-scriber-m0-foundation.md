@@ -16,7 +16,7 @@
 - All `unsafe` and all C++ lives in `scriber-occt`. No other crate may declare `unsafe` in this milestone.
 - Application license is **MIT OR Apache-2.0**. Every crate carries this in its `Cargo.toml`.
 - Required attribution, verbatim, in README and About: *"This software makes use of and is based on facilities provided by the Open CASCADE Technology software."*
-- Application ID is `io.github.OWNER.Scriber`. `OWNER` is a literal placeholder; the implementer must replace every occurrence with the actual GitHub account name before Task 7.
+- Application ID is `io.github.SilkePilon.Scriber`. This plan was drafted with `OWNER` as a literal placeholder for the GitHub account name; that placeholder has since been resolved to `SilkePilon` throughout, so the IDs, paths and URLs below can be used verbatim.
 - Every dependency is pinned to an exact version or commit hash. No floating version ranges beyond Cargo's default caret on published crates.
 - Commit after every task. Never commit a failing test suite.
 
@@ -38,7 +38,7 @@
 | `crates/scriber-kernel/src/lib.rs` | Safe Rust API — `Solid` and its operations |
 | `crates/scriber-kernel/src/error.rs` | Kernel error type |
 | `crates/scriber-cli/src/main.rs` | CLI entry point |
-| `build-aux/io.github.OWNER.Scriber.yaml` | Flatpak manifest, including the OCCT module |
+| `build-aux/io.github.SilkePilon.Scriber.yaml` | Flatpak manifest, including the OCCT module |
 | `.github/workflows/ci.yml` | Build, test, clippy, and the dynamic-linking assertion |
 | `.github/workflows/release.yml` | Tag-triggered Flatpak build, sign, publish to Pages |
 
@@ -76,7 +76,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/OWNER/scriber"
+repository = "https://github.com/SilkePilon/scriber"
 
 [workspace.dependencies]
 cxx = "1.0.130"
@@ -706,9 +706,6 @@ In `crates/scriber-occt/src/shim.cpp`, add these includes:
 
 ```cpp
 #include <IFSelect_ReturnStatus.hxx>
-#include <Message.hxx>
-#include <Message_Messenger.hxx>
-#include <Message_PrinterOStream.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <STEPControl_Writer.hxx>
 
@@ -773,7 +770,21 @@ a transfer banner on every write, and diagnostics from other subsystems. A CLI
 owns its stdout, so the printers are removed once, eagerly, from the top of
 *every* shim entry point rather than lazily inside `write_step`. Doing it lazily
 would let kernel chatter escape during the `make_box`/`cut` calls that precede
-the first write. Add to `shim.hpp`, inside `namespace scriber`, above `guard()`:
+the first write. Because it lives in the header, its declarations must be
+visible to every translation unit that includes `shim.hpp` — including the
+bridge file cxx generates — so the messenger headers belong in `shim.hpp`, not
+in `shim.cpp`. Add to the include block of `crates/scriber-occt/src/shim.hpp`:
+
+```cpp
+#include <Message.hxx>
+#include <Message_Messenger.hxx>
+#include <Message_PrinterOStream.hxx>
+```
+
+`STANDARD_TYPE()` needs `Standard_Type.hxx`, which the header already includes
+for the `DynamicType()->Name()` path in `guard()`.
+
+Then add, inside `namespace scriber`, above `guard()`:
 
 ```cpp
 // Drops OCCT's console printers the first time any shim function runs, so
@@ -1302,7 +1313,7 @@ git commit -m "feat(cli): add smoke command proving the kernel end to end"
 ### Task 7: Flatpak packaging
 
 **Files:**
-- Create: `build-aux/io.github.OWNER.Scriber.yaml`
+- Create: `build-aux/io.github.SilkePilon.Scriber.yaml`
 - Create: `build-aux/cargo-sources.json` (generated, committed)
 - Create: `scripts/check-dynamic-occt.sh`
 
@@ -1310,7 +1321,7 @@ git commit -m "feat(cli): add smoke command proving the kernel end to end"
 - Consumes: the `scriber` binary from Task 6.
 - Produces: a Flatpak bundle containing `/app/bin/scriber`, dynamically linked against OCCT 8.0.1.
 
-Replace every `OWNER` below with the real GitHub account name before starting.
+The `OWNER` placeholder used while drafting is already resolved below to the real GitHub account name, `SilkePilon`; nothing needs substituting before starting.
 
 - [ ] **Step 1: Install the Flatpak toolchain and runtime**
 
@@ -1326,10 +1337,10 @@ already installed, so this step is a no-op there.
 
 - [ ] **Step 2: Write the manifest**
 
-Create `build-aux/io.github.OWNER.Scriber.yaml`:
+Create `build-aux/io.github.SilkePilon.Scriber.yaml`:
 
 ```yaml
-id: io.github.OWNER.Scriber
+id: io.github.SilkePilon.Scriber
 runtime: org.gnome.Platform
 runtime-version: '50'
 sdk: org.gnome.Sdk
@@ -1439,7 +1450,7 @@ Expected: `OK: target/debug/scriber dynamically links OCCT.` followed by an inde
 Run:
 
 ```bash
-flatpak-builder --force-clean --repo=/tmp/scriber-repo build-dir build-aux/io.github.OWNER.Scriber.yaml
+flatpak-builder --force-clean --repo=/tmp/scriber-repo build-dir build-aux/io.github.SilkePilon.Scriber.yaml
 ```
 
 Expected: a successful build. OCCT takes a long time to compile the first time; this is normal.
@@ -1447,11 +1458,17 @@ Expected: a successful build. OCCT takes a long time to compile the first time; 
 - [ ] **Step 7: Install and run it**
 
 ```bash
-flatpak-builder --run build-dir build-aux/io.github.OWNER.Scriber.yaml scriber smoke --output /tmp/flatpak-smoke.step
-head -c 13 /tmp/flatpak-smoke.step
+flatpak-builder --run build-dir build-aux/io.github.SilkePilon.Scriber.yaml \
+  scriber smoke --output "$HOME/Documents/flatpak-smoke.step"
+head -c 13 "$HOME/Documents/flatpak-smoke.step"
 ```
 
 Expected: `ISO-10303-21;`
+
+The output path must be one the sandbox shares with the host. `/tmp` is not:
+every Flatpak sandbox gets a private `/tmp`, so `--output /tmp/…` prints a
+success line and leaves nothing behind on the host — the `head` above would then
+fail with "No such file or directory".
 
 - [ ] **Step 8: Commit**
 
@@ -1601,7 +1618,7 @@ jobs:
           flatpak-builder --force-clean --disable-rofiles-fuse \
             --repo=pages/repo \
             --gpg-sign=${{ secrets.FLATPAK_GPG_KEYID }} \
-            build-dir build-aux/io.github.OWNER.Scriber.yaml
+            build-dir build-aux/io.github.SilkePilon.Scriber.yaml
 
       - name: Update repository metadata and generate deltas
         run: |
@@ -1614,20 +1631,20 @@ jobs:
         run: |
           flatpak build-bundle pages/repo \
             "Scriber-${GITHUB_REF_NAME}-x86_64.flatpak" \
-            io.github.OWNER.Scriber \
+            io.github.SilkePilon.Scriber \
             --gpg-sign=${{ secrets.FLATPAK_GPG_KEYID }}
 
       - name: Write the remote definitions
         run: |
           cp scriber.gpg pages/scriber.gpg
           KEY_B64=$(base64 -w0 scriber.gpg)
-          BASE="https://OWNER.github.io/scriber"
+          BASE="https://SilkePilon.github.io/scriber"
 
           cat > pages/scriber.flatpakrepo <<EOF
           [Flatpak Repo]
           Title=Scriber
           Url=${BASE}/repo/
-          Homepage=https://github.com/OWNER/scriber
+          Homepage=https://github.com/SilkePilon/scriber
           Comment=Local-only 3D CAD for GNOME
           GPGKey=${KEY_B64}
           EOF
@@ -1635,7 +1652,7 @@ jobs:
           cat > pages/scriber.flatpakref <<EOF
           [Flatpak Ref]
           Title=Scriber
-          Name=io.github.OWNER.Scriber
+          Name=io.github.SilkePilon.Scriber
           Branch=master
           Url=${BASE}/repo/
           RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
@@ -1674,15 +1691,15 @@ Add the remote once, then install and receive updates like any other app:
 
 ```sh
 flatpak remote-add --if-not-exists scriber \
-  https://OWNER.github.io/scriber/scriber.flatpakrepo
+  https://SilkePilon.github.io/scriber/scriber.flatpakrepo
 
-flatpak install scriber io.github.OWNER.Scriber
+flatpak install scriber io.github.SilkePilon.Scriber
 ```
 
 Or install in one step:
 
 ```sh
-flatpak install https://OWNER.github.io/scriber/scriber.flatpakref
+flatpak install https://SilkePilon.github.io/scriber/scriber.flatpakref
 ```
 
 If you would rather not add a remote, each release has a standalone bundle.
@@ -1709,20 +1726,24 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Expected: the Release workflow succeeds, and `https://OWNER.github.io/scriber/scriber.flatpakrepo` is reachable.
+Expected: the Release workflow succeeds, and `https://SilkePilon.github.io/scriber/scriber.flatpakrepo` is reachable.
 
 - [ ] **Step 7: Verify installation as a user would**
 
 On a machine that has never built Scriber:
 
 ```bash
-flatpak remote-add --if-not-exists scriber https://OWNER.github.io/scriber/scriber.flatpakrepo
-flatpak install -y scriber io.github.OWNER.Scriber
-flatpak run io.github.OWNER.Scriber smoke --output ~/scriber-smoke.step
-head -c 13 ~/scriber-smoke.step
+flatpak remote-add --if-not-exists scriber https://SilkePilon.github.io/scriber/scriber.flatpakrepo
+flatpak install -y scriber io.github.SilkePilon.Scriber
+flatpak run io.github.SilkePilon.Scriber smoke --output ~/Documents/scriber-smoke.step
+head -c 13 ~/Documents/scriber-smoke.step
 ```
 
 Expected: `ISO-10303-21;`
+
+The manifest grants exactly one filesystem permission, `--filesystem=xdg-documents`,
+so `~/Documents` is the only host location the app can write. Writing to `~` or
+`/tmp` instead succeeds *inside* the sandbox and leaves no file on the host.
 
 - [ ] **Step 8: Commit any fixes**
 

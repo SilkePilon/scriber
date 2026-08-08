@@ -43,6 +43,35 @@ gpg --show-keys scriber.gpg
 
 Expected fingerprint: 227A 3502 615E D0CA 6211 7A3E 98B3 BA3F 926E 29CD
 
+## Usage
+
+There is no GUI, no modeling, and no document format yet. The only command is
+`smoke`: a diagnostic that proves the geometry pipeline — Rust, through our own
+C++ bridge, into OpenCASCADE and back out as STEP — works on your machine. It is
+not a feature.
+
+Scriber's sandbox can only write to your Documents folder, so send the output
+there:
+
+```sh
+flatpak run io.github.SilkePilon.Scriber smoke --output ~/Documents/smoke.step
+```
+
+A working install prints one line:
+
+```
+wrote /home/<user>/Documents/smoke.step — volume 968.5841
+```
+
+The solid it builds is a 10 x 10 x 10 block with a quarter of a radius-2,
+height-10 cylinder bored out of one corner, so 968.5841 is the analytic answer:
+`1000 - (pi * 2^2 * 10) / 4`. If that number comes back, the kernel is computing
+real geometry rather than reporting success it did not earn.
+
+The file it leaves behind is a valid STEP model — 428 entities, 19178 bytes,
+opening with `ISO-10303-21;` and closing with `END-ISO-10303-21;` — which you
+can load in any CAD application that reads STEP.
+
 ## License
 
 Dual licensed under MIT or Apache-2.0, at your option.

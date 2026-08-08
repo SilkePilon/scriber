@@ -7,6 +7,15 @@ on:
 permissions:
   contents: write
 
+# Every tag build force-pushes the whole ostree repo to gh-pages, so two of them
+# must never overlap: if a slower older run finishes last it republishes a stale
+# repo, and every install and update then points back at the previous release.
+# Serialised rather than cancelled — cancelling a run mid-push would leave
+# gh-pages holding a half-written repo, which is worse than a slow queue.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,11 +30,29 @@ jobs:
 
       - name: Add flathub and install the runtime
         run: |
+          set -euo pipefail
           flatpak remote-add --if-not-exists flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install -y --noninteractive flathub \
-            org.gnome.Platform//50 org.gnome.Sdk//50 \
-            org.freedesktop.Sdk.Extension.rust-stable//25.08
+            org.gnome.Platform//50 org.gnome.Sdk//50
+
+          # The manifest lists rust-stable under sdk-extensions with NO version,
+          # so flatpak-builder resolves the branch itself from the SDK. Hardcoding
+          # a second, independent pin here would drift: the extension's branch
+          # tracks the *Freedesktop* SDK underneath org.gnome.Sdk, not the GNOME
+          # major version, and the two move on different schedules (GNOME 50
+          # currently sits on Freedesktop 25.08). Read the branch out of the SDK's
+          # own metadata so there is exactly one source of truth.
+          RUST_BRANCH=$(flatpak info --show-metadata org.gnome.Sdk//50 |
+            sed -n '/^\[Extension org\.freedesktop\.Sdk\.Extension\]$/,/^\[/{s/^version *= *//p}')
+          if [ -z "$RUST_BRANCH" ]; then
+            echo "Could not read the Freedesktop SDK extension branch from org.gnome.Sdk//50." >&2
+            echo "Check the [Extension org.freedesktop.Sdk.Extension] section of its metadata." >&2
+            exit 1
+          fi
+          echo "Resolved rust-stable branch to $RUST_BRANCH"
+          flatpak install -y --noninteractive flathub \
+            "org.freedesktop.Sdk.Extension.rust-stable//${RUST_BRANCH}"
 
       - name: Import the signing key
         env:
@@ -89,9 +116,20 @@ jobs:
         env:
           GPG_KEYID: ${{ secrets.FLATPAK_GPG_KEYID }}
         run: |
+          # --runtime-repo is what makes `flatpak install --bundle` work on a
+          # clean machine: a bundle carries the app but not org.gnome.Platform//50,
+          # and without a runtime repo URL recorded inside it the install aborts
+          # on a machine that has no flathub remote. README documents that path.
+          #
+          # --gpg-keys embeds the public half of the signing key in the bundle so
+          # it verifies against itself; --gpg-sign alone signs with a key the user
+          # would have to fetch separately. scriber.gpg is at the repo root and
+          # this step runs in the checkout, same as the `pages/repo` path below.
           flatpak build-bundle pages/repo \
             "Scriber-${GITHUB_REF_NAME}-x86_64.flatpak" \
             io.github.SilkePilon.Scriber \
+            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            --gpg-keys=scriber.gpg \
             --gpg-sign="$GPG_KEYID"
 
       - name: Write the remote definitions

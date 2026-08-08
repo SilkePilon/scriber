@@ -32,8 +32,38 @@ pub mod ffi {
 mod tests {
     use super::ffi;
 
+    /// Serialises every test that enters OCCT.
+    ///
+    /// The harness runs these on one thread per core, but OCCT is not
+    /// thread-safe and Scriber's design confines all kernel work to a single
+    /// dedicated thread. `silence_kernel_console()` in `shim.hpp` is the
+    /// sharpest edge: its function-local static makes the *initialisation*
+    /// once-only, but the work it does is `RemovePrinters` on OCCT's global
+    /// messenger, and a thread already inside `Message::DefaultMessenger()`
+    /// can be reading that same printer list — an unsynchronised mutation of
+    /// shared state, i.e. a data race, however rarely it bites.
+    ///
+    /// Stress-testing 32 threads through make/cut/volume did not make OCCT
+    /// 7.9.3 misbehave, so this is insurance rather than a fix for an observed
+    /// flake: it keeps the test suite honest to the threading model the rest
+    /// of the codebase promises, and costs nothing (these tests are ~10ms).
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Takes the kernel lock, ignoring poisoning.
+    ///
+    /// A poisoned lock only means some earlier test's assertion failed, which
+    /// says nothing about OCCT's state. Unwrapping would turn one real failure
+    /// into a cascade of unrelated ones and bury the actual cause.
+    fn lock_kernel() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn box_has_expected_volume() {
+        let _kernel = lock_kernel();
+
         let shape = ffi::make_box(2.0, 3.0, 4.0).expect("box builds");
         let volume = ffi::volume(&shape).expect("volume computes");
         assert!(
@@ -46,6 +76,8 @@ mod tests {
     fn degenerate_box_is_an_error_not_a_crash() {
         // OCCT raises Standard_DomainError here. If the shim's guard were
         // missing, this would abort the test process instead of returning Err.
+        let _kernel = lock_kernel();
+
         let error = ffi::make_box(0.0, 1.0, 1.0)
             .err()
             .expect("expected a zero-width box to be rejected");
@@ -60,6 +92,8 @@ mod tests {
 
     #[test]
     fn cut_removes_the_tool_volume() {
+        let _kernel = lock_kernel();
+
         // A 10×10×10 block with a full-height radius-2 cylinder bored out.
         let block = ffi::make_box(10.0, 10.0, 10.0).expect("block builds");
         let drill = ffi::make_cylinder(2.0, 10.0).expect("cylinder builds");
@@ -89,6 +123,8 @@ mod tests {
         // the box's Standard_DomainError. Rejecting the merely-degenerate
         // inputs is validation for the safe wrapper in Task 5, not for this
         // bridge; what is tested here is that the guard translates the raise.
+        let _kernel = lock_kernel();
+
         let error = ffi::make_cylinder(-1.0, 1.0)
             .err()
             .expect("expected a negative-radius cylinder to be rejected");
@@ -102,6 +138,8 @@ mod tests {
 
     #[test]
     fn write_step_produces_a_valid_header() {
+        let _kernel = lock_kernel();
+
         let shape = ffi::make_box(1.0, 1.0, 1.0).expect("box builds");
         let path = std::env::temp_dir().join(format!(
             "scriber_occt_write_step_{}.step",
@@ -150,6 +188,8 @@ mod tests {
         // the status in itself. Task 5's Error::StepWriteFailed { path, reason }
         // gets the path from Rust, which already has it; the shim deliberately
         // leaves it out of the message to avoid printing it twice.
+        let _kernel = lock_kernel();
+
         let shape = ffi::make_box(1.0, 1.0, 1.0).expect("box builds");
         let error = ffi::write_step(&shape, "/nonexistent-directory-scriber/model.step")
             .expect_err("expected a write into a missing directory to be rejected");

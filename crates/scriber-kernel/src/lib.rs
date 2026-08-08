@@ -68,6 +68,20 @@ impl Solid {
             reason: "path is not valid UTF-8".to_owned(),
         })?;
 
+        // A NUL is legal in a Rust str but terminates a C string. The shim
+        // rebuilds the path as std::string(data, size) and hands OCCT its
+        // .c_str(), so without this check OCCT silently writes to the prefix
+        // before the NUL and reports success — a caller asking for
+        // "report\0.step" gets a file called "report" and no indication that
+        // anything was substituted. Refusing is the only safe reading: we
+        // cannot know which of the two paths was meant.
+        if as_str.contains('\0') {
+            return Err(Error::StepWriteFailed {
+                path: path.to_path_buf(),
+                reason: "path contains an interior NUL byte".to_owned(),
+            });
+        }
+
         // Keep OCCT's own message — it is the only clue about why a write failed.
         ffi::write_step(&self.inner, as_str).map_err(|exception| Error::StepWriteFailed {
             path: path.to_path_buf(),
@@ -101,7 +115,11 @@ fn check_extent(name: &'static str, value: f64) -> Result<(), Error> {
     Ok(())
 }
 
-/// Returns the crate's semantic version, used to stamp exported files.
+/// Returns this crate's own semantic version, as declared in `Cargo.toml`.
+///
+/// Nothing in the workspace consumes it yet — in particular `write_step` does
+/// NOT stamp it into exported files. It exists so an embedder can report which
+/// kernel build it is talking to.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -112,7 +130,20 @@ mod tests {
 
     #[test]
     fn version_is_reported() {
-        assert_eq!(version(), "0.1.0");
+        // Compare against the contract, not against today's number: pinning the
+        // literal "0.1.0" made this test fail on every release bump without
+        // catching a single real defect.
+        assert_eq!(version(), env!("CARGO_PKG_VERSION"));
+
+        // The above alone would still pass if version() returned an empty or
+        // otherwise unusable string, so pin the shape the name promises.
+        let parts: Vec<&str> = version().split('.').collect();
+        assert_eq!(parts.len(), 3, "not a semantic version: {}", version());
+        assert!(
+            parts.iter().all(|p| !p.is_empty()),
+            "semantic version has an empty component: {}",
+            version()
+        );
     }
 
     #[test]
@@ -196,6 +227,37 @@ mod tests {
         assert!(path.metadata().expect("file exists").len() > 0);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn step_export_rejects_a_path_containing_a_nul() {
+        let solid = Solid::cuboid(1.0, 1.0, 1.0).expect("cuboid builds");
+
+        // The prefix before the NUL is a writable path that would succeed on
+        // its own, which is exactly what makes the old behaviour dangerous:
+        // OCCT saw only the prefix, wrote there, and reported success.
+        let prefix =
+            std::env::temp_dir().join(format!("scriber_kernel_nul_{}.step", std::process::id()));
+        std::fs::remove_file(&prefix).ok();
+        assert!(!prefix.exists(), "could not clear {prefix:?}");
+
+        let requested = format!("{}\u{0}ignored.step", prefix.display());
+        let err = solid
+            .write_step(&requested)
+            .expect_err("a path with an interior NUL must be rejected");
+
+        assert!(
+            matches!(&err, Error::StepWriteFailed { reason, .. } if reason.contains("NUL")),
+            "got {err:?}"
+        );
+
+        // The point of the fix: nothing was written to the truncated path.
+        assert!(
+            !prefix.exists(),
+            "write_step truncated the path at the NUL and wrote to {prefix:?}"
+        );
+
+        std::fs::remove_file(&prefix).ok();
     }
 
     #[test]

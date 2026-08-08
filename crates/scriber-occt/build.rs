@@ -1,4 +1,17 @@
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
+
+/// Prefixes whose library directories the dynamic loader already searches, so
+/// linking against them must NOT bake a RUNPATH into the binary.
+///
+/// `/usr` and `/usr/local` are on the default path of every glibc system.
+/// `/app` is Flatpak's prefix: its runtime already puts `/app/lib` on the
+/// loader path, and an absolute build-time rpath has no business inside a
+/// relocatable bundle. Anything else is a custom prefix that the loader would
+/// not find on its own.
+const LOADER_DEFAULT_PREFIXES: &[&str] = &["/usr", "/usr/local", "/app"];
 
 /// OCCT toolkits required by the current shim. Add to this list only when a new
 /// shim function needs symbols from a toolkit that is not already here.
@@ -45,10 +58,40 @@ fn main() {
         .std("c++17")
         .compile("scriber-occt-shim");
 
+    // rustc-link-search is a LINK-time path only. When OCCT lives somewhere the
+    // dynamic loader does not already search, the build succeeds but every
+    // resulting binary dies at startup on `libTKernel.so: cannot open shared
+    // object file`. Emitting a RUNPATH alongside the search path is what makes
+    // a custom prefix actually runnable.
+    //
+    // SCOPE LIMIT, verified rather than assumed: `cargo:rustc-link-arg` applies
+    // only to the targets of the package emitting it, and does NOT propagate to
+    // dependents the way rustc-link-search and rustc-link-lib do. Building the
+    // workspace with OCCT_ROOT=/tmp/occt-prefix puts DT_RPATH on this crate's
+    // own test binary and on nothing else — `scriber`, scriber-kernel's test
+    // binary and the smoke test all come out bare and still die at startup.
+    // Covering those needs an equivalent emission from a build script in the
+    // *binary* crate; there is no way to reach them from here.
+    let needs_rpath = !LOADER_DEFAULT_PREFIXES
+        .iter()
+        .any(|prefix| root == Path::new(prefix));
+
     for dir in ["lib64", "lib"] {
         let candidate = root.join(dir);
         if candidate.exists() {
             println!("cargo:rustc-link-search=native={}", candidate.display());
+
+            if needs_rpath {
+                // --disable-new-dtags is load-bearing: it emits DT_RPATH rather
+                // than DT_RUNPATH. The linker's --as-needed leaves most OCCT
+                // toolkits out of the binary's own DT_NEEDED (they arrive
+                // transitively through the six that survive), and DT_RUNPATH is
+                // NOT consulted for a dependency's own dependencies while
+                // DT_RPATH is inherited down the chain. With DT_RUNPATH the
+                // loader finds libTKernel and then dies on libTKG2d.
+                println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags");
+                println!("cargo:rustc-link-arg=-Wl,-rpath,{}", candidate.display());
+            }
         }
     }
 
