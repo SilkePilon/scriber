@@ -17,10 +17,12 @@
 pub mod ast;
 pub mod backend;
 pub mod diag;
+pub mod eval;
 pub mod lexer;
 pub mod parser;
 pub mod syntax;
 pub mod units;
 
+pub use eval::{Evaluated, Value, evaluate};
 pub use parser::{Parse, SyntaxError, parse};
 pub use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, print};
