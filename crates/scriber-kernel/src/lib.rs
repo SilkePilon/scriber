@@ -88,6 +88,33 @@ impl Solid {
             reason: exception.what().to_owned(),
         })
     }
+
+    /// Writes this solid to `path` as ASCII STL.
+    ///
+    /// The shim triangulates before writing: OCCT does not mesh on demand, and
+    /// an unmeshed shape produces a well-formed file containing zero facets.
+    pub fn write_stl(&self, path: impl AsRef<Path>) -> Result<(), Error> {
+        let path = path.as_ref();
+        let as_str = path.to_str().ok_or_else(|| Error::StepWriteFailed {
+            path: path.to_path_buf(),
+            reason: "path is not valid UTF-8".to_owned(),
+        })?;
+
+        // Same hazard as `write_step`: a NUL is legal in a Rust str but
+        // terminates the C string OCCT receives, so without this check the
+        // kernel would write to the prefix and report success.
+        if as_str.contains('\0') {
+            return Err(Error::StepWriteFailed {
+                path: path.to_path_buf(),
+                reason: "path contains an interior NUL".to_owned(),
+            });
+        }
+
+        ffi::write_stl(&self.inner, as_str).map_err(|exception| Error::StepWriteFailed {
+            path: path.to_path_buf(),
+            reason: exception.what().to_owned(),
+        })
+    }
 }
 
 /// Derive is impossible: `ffi::Shape` is opaque to Rust, so there is nothing to
@@ -258,6 +285,21 @@ mod tests {
         );
 
         std::fs::remove_file(&prefix).ok();
+    }
+
+    #[test]
+    fn stl_export_writes_a_meshed_file() {
+        let solid = Solid::cuboid(10.0, 10.0, 10.0).expect("cuboid builds");
+        let path =
+            std::env::temp_dir().join(format!("scriber_kernel_export_{}.stl", std::process::id()));
+        std::fs::remove_file(&path).ok();
+
+        solid.write_stl(&path).expect("export succeeds");
+
+        let contents = std::fs::read_to_string(&path).expect("readable");
+        assert_eq!(contents.matches("facet normal").count(), 12);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

@@ -25,6 +25,9 @@ pub mod ffi {
 
         /// Writes `shape` to `path` as AP214 STEP.
         fn write_step(shape: &Shape, path: &str) -> Result<()>;
+
+        /// Writes `shape` to `path` as ASCII STL, meshing it first.
+        fn write_stl(shape: &Shape, path: &str) -> Result<()>;
     }
 }
 
@@ -163,6 +166,36 @@ mod tests {
         assert!(
             contents.contains("END-ISO-10303-21;"),
             "STEP file is truncated"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write_stl_produces_a_non_empty_solid() {
+        // Same convention as every other test in this module: OCCT is not
+        // thread-safe, so kernel tests serialize.
+        let _kernel = lock_kernel();
+
+        let shape = ffi::make_box(10.0, 10.0, 10.0).expect("box builds");
+        let path =
+            std::env::temp_dir().join(format!("scriber_occt_write_stl_{}.stl", std::process::id()));
+        std::fs::remove_file(&path).ok();
+
+        ffi::write_stl(&shape, path.to_str().expect("utf-8 path")).expect("write_stl succeeds");
+
+        let contents = std::fs::read_to_string(&path).expect("STL is readable");
+        assert!(
+            contents.starts_with("solid"),
+            "not an ASCII STL: {:?}",
+            &contents[..20.min(contents.len())]
+        );
+        // A cube is 12 triangles. Zero facets would mean the shape was never
+        // meshed, which is the failure mode this test exists to catch.
+        assert_eq!(
+            contents.matches("facet normal").count(),
+            12,
+            "wrong facet count"
         );
 
         std::fs::remove_file(&path).ok();

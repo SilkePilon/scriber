@@ -2,12 +2,14 @@
 
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepGProp.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <STEPControl_Writer.hxx>
+#include <StlAPI_Writer.hxx>
 
 #include <string>
 
@@ -103,6 +105,26 @@ void write_step(const Shape &shape, rust::Str path) {
     if (written != IFSelect_RetDone) {
       throw std::runtime_error(std::string("STEP write failed (") +
                                status_name(written) + ")");
+    }
+  });
+}
+
+void write_stl(const Shape &shape, rust::Str path) {
+  guard([&] {
+    silence_kernel_console();
+
+    // STL is a mesh format. OCCT does not triangulate on demand, so an
+    // unmeshed shape writes a valid-looking file with zero facets.
+    BRepMesh_IncrementalMesh mesher(shape.inner, 0.01);
+    if (!mesher.IsDone()) {
+      throw std::runtime_error("STL meshing failed");
+    }
+
+    const std::string target(path.data(), path.size());
+
+    StlAPI_Writer writer;
+    if (!writer.Write(shape.inner, target.c_str())) {
+      throw std::runtime_error("STL write failed");
     }
   });
 }
