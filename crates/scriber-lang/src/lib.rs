@@ -5,6 +5,8 @@
 //! A document is parsed into a lossless concrete syntax tree, viewed through
 //! a typed AST, and evaluated against a [`Backend`] that supplies geometry.
 //! This crate never links OCCT.
+//!
+//! [`Backend`]: backend::Backend
 
 // `unsafe` and C++ live only in scriber-occt, where the FFI boundary makes them
 // unavoidable. Everything else in the workspace stays in safe Rust, so a memory
@@ -13,6 +15,7 @@
 // `deny` it cannot be lifted by an `allow` further down the tree.
 
 pub mod ast;
+pub mod backend;
 pub mod diag;
 pub mod lexer;
 pub mod parser;
