@@ -12,6 +12,7 @@
 // here rather than a convention a later change can quietly break, and unlike
 // `deny` it cannot be lifted by an `allow` further down the tree.
 
+pub mod lexer;
 pub mod syntax;
 
 pub use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, print};
