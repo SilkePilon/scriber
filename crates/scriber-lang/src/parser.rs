@@ -214,7 +214,9 @@ impl Parser {
                 self.builder.start_node(SyntaxKind::ParenExpr.into());
                 self.bump();
                 self.expr(0);
-                self.eat_trivia();
+                // No `eat_trivia` here: `expect` looks past trivia without
+                // consuming it, and consumes it only on the branch that finds
+                // the `)` and so has somewhere to put it.
                 self.expect(SyntaxKind::RParen, "expected `)`");
                 self.builder.finish_node();
             }
@@ -241,12 +243,18 @@ impl Parser {
         self.bump(); // `(`
 
         loop {
-            self.eat_trivia();
-            match self.current() {
+            // Peeked, not eaten: on the pass that ends the list there is no
+            // argument node to put the trivia in, and eating it here would
+            // pull the line's trailing newline inside the call.
+            match self.peek_non_trivia(0) {
                 None | Some(SyntaxKind::RParen) => break,
                 _ => {}
             }
 
+            // Past the break there is definitely another argument, so the
+            // space in front of it can be settled — outside `Arg`, where the
+            // separator belongs.
+            self.eat_trivia();
             self.builder.start_node(SyntaxKind::Arg.into());
             // A named argument is `ident =`; anything else is positional.
             if self.current() == Some(SyntaxKind::Ident)
@@ -259,15 +267,13 @@ impl Parser {
             self.expr(0);
             self.builder.finish_node();
 
-            self.eat_trivia();
-            if self.current() == Some(SyntaxKind::Comma) {
+            if self.peek_non_trivia(0) == Some(SyntaxKind::Comma) {
                 self.bump();
             } else {
                 break;
             }
         }
 
-        self.eat_trivia();
         self.expect(SyntaxKind::RParen, "expected `)`");
         self.builder.finish_node();
     }
@@ -318,10 +324,16 @@ impl Parser {
 
     /// Consumes `kind`, or reports `message` and recovers. The bool says which,
     /// so a caller can stop rather than pile a second error onto one mistake.
+    ///
+    /// The check is a peek: eating the trivia first and only then discovering
+    /// the token is missing would leave the space — and, at the end of a line,
+    /// the newline — inside whatever node the caller is about to close, and
+    /// every diagnostic drawn from that node's range would run on past it. The
+    /// trivia is consumed only on the branch that found the token and has
+    /// somewhere to put it.
     fn expect(&mut self, kind: SyntaxKind, message: &str) -> bool {
-        self.eat_trivia();
-        if self.current() == Some(kind) {
-            self.bump_raw();
+        if self.peek_non_trivia(0) == Some(kind) {
+            self.bump();
             true
         } else {
             self.recover(message);
@@ -451,6 +463,31 @@ mod tests {
         assert!(debug.contains("ParamDecl@0..21"), "{debug}");
         // And the trivia is still in the tree, one level out, so nothing is
         // lost — the round-trip below and in `tests/roundtrip.rs` prove it.
+        assert_eq!(print(&parse(source).syntax()), source);
+    }
+
+    #[test]
+    fn an_unclosed_call_ends_at_the_last_character_on_its_line() {
+        // The arity error in `eval` is raised from the call's range, so a call
+        // that swallows its line's newline draws a caret block over the next
+        // statement — which has nothing wrong with it.
+        let source = "body b = cuboid(1, 2\nbody b2 = cuboid(1,2,3)\n";
+        let debug = format!("{:#?}", parse(source).syntax());
+
+        // `cuboid(1, 2` is 9..20; 20 is the newline.
+        assert!(debug.contains("CallExpr@9..20"), "{debug}");
+        assert_eq!(print(&parse(source).syntax()), source);
+    }
+
+    #[test]
+    fn a_statement_missing_a_part_ends_before_the_blank_line() {
+        // `expect` failing must not have eaten the trivia it looked past, or
+        // the statement's range covers the empty lines after it.
+        let source = "param x\n\nbody y = 2\n";
+        let debug = format!("{:#?}", parse(source).syntax());
+
+        // `param x` is 0..7; 7 and 8 are the two newlines.
+        assert!(debug.contains("ParamDecl@0..7"), "{debug}");
         assert_eq!(print(&parse(source).syntax()), source);
     }
 

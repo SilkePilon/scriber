@@ -1,0 +1,15 @@
+---
+source: crates/scriber-lang/tests/diagnostics.rs
+expression: "rendered(\"body b = cuboid(1, 2\\nbody b2 = cuboid(1,2,3)\\n\")"
+---
+error: expected `)`
+  ┌─ doc.scr:1:21
+  │
+1 │ body b = cuboid(1, 2
+  │                     ^
+
+error: `cuboid` expects 3 arguments (dx, dy, dz), found 2
+  ┌─ doc.scr:1:10
+  │
+1 │ body b = cuboid(1, 2
+  │          ^^^^^^^^^^^

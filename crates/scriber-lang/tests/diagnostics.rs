@@ -40,6 +40,15 @@ fn wrong_arity() {
 }
 
 #[test]
+fn wrong_arity_in_an_unclosed_call() {
+    // The call is missing its `)`, so both errors are drawn from spans that
+    // end where the line does. Neither caret may reach line 2: the second
+    // statement is well-formed, and pointing at it sends the reader hunting
+    // for a mistake that is not there.
+    insta::assert_snapshot!(rendered("body b = cuboid(1, 2\nbody b2 = cuboid(1,2,3)\n"));
+}
+
+#[test]
 fn several_errors_at_once() {
     insta::assert_snapshot!(rendered("param a = nope\nparam b = alsonope\nbody c = 5\n"));
 }
