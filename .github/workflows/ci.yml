@@ -27,6 +27,27 @@ jobs:
           toolchain: 1.97.1
           components: rustfmt, clippy
 
+      - name: Cache the cargo registry and target directory
+        # Must come after the toolchain step: the cache key includes the rustc
+        # version, and rust-cache reads it by invoking the compiler.
+        #
+        # CAVEAT, since this workspace is not pure Rust. rust-cache saves
+        # ~/.cargo plus target/, but before saving it deletes the artifacts of
+        # the workspace's OWN crates and keeps only third-party dependencies —
+        # otherwise the cache would grow without bound. crates/scriber-occt is a
+        # workspace member, so the C++ that its build.rs compiles through
+        # cxx-build (shim.cpp, the cxxbridge glue, libscriber-occt-shim.a) is
+        # NOT cached and is rebuilt every run. That is a handful of translation
+        # units. What this does cache is the dependency tree — cxx, clap, serde
+        # and friends — which is the bulk of a cold `cargo test --workspace`.
+        #
+        # Nothing here weakens a check: every dependency is still compiled from
+        # the same pinned Cargo.lock, and the key changes when Cargo.lock or the
+        # toolchain does. The OCCT the shim compiles against comes from the
+        # image's opencascade-devel and is outside the key, which is safe
+        # precisely because the shim objects are the part that is never cached.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -138,3 +159,111 @@ jobs:
           # — is compiled in full. Nothing is linked, which is exactly why no
           # OCCT library has to be built.
           OCCT_ROOT=/tmp/occt-build cargo check -p scriber-occt
+
+  # WHY THIS JOB EXISTS, and it is not the obvious reason. release.yml caches
+  # .flatpak-builder so that a tagged build restores OCCT instead of spending
+  # the better part of an hour compiling it. On its own that cache would never
+  # once be hit:
+  # GitHub scopes a cache to the ref that wrote it plus the DEFAULT BRANCH, and
+  # release.yml runs on refs/tags/v*, a different ref for every release. A cache
+  # written by the v0.1.0 build is invisible to the v0.1.1 build.
+  #
+  # The default-branch scope is the only one every tag run can read, so
+  # something has to run on the default branch and write the key release.yml
+  # looks up. That is this job. It uses the same key, the same image, the same
+  # runtime and the same flatpak-builder invocation, so what it leaves behind is
+  # a cache the release build can use directly.
+  #
+  # PRECONDITION, stated because the whole design rests on it: `main` must be
+  # this repository's default branch. If the default branch is renamed, change
+  # the `on: push: branches:` filter at the top of this file with it or the
+  # release job silently goes back to hour-long builds.
+  #
+  # It is also the first thing in CI that LINKS and RUNS against OCCT 8 rather
+  # than merely compiling headers against it — the gap the comment on
+  # occt8-shim above describes in full. That is a bonus, not the motivation.
+  flatpak:
+    # Push only, which given the trigger at the top of this file means the
+    # default branch. Pull requests are deliberately excluded: a PR's cache
+    # lands in the PR's own scope, which no release run can read, so it would
+    # add minutes to every PR and warm nothing.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:44
+      options: --privileged
+    steps:
+      - name: Install the flatpak toolchain
+        run: dnf install -y flatpak flatpak-builder git ostree
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Cache the flatpak-builder state
+        # Key and paths are identical to release.yml's restore step by
+        # construction — see the long comment there for why the manifest is the
+        # right thing to hash and why build/ is excluded. If you change one,
+        # change the other, or the release build stops hitting this cache.
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            .flatpak-builder/cache
+            .flatpak-builder/ccache
+            .flatpak-builder/downloads
+          key: flatpak-builder-fedora44-gnome50-${{ hashFiles('build-aux/io.github.SilkePilon.Scriber.yaml') }}
+          restore-keys: |
+            flatpak-builder-fedora44-gnome50-
+
+      - name: Bound the ccache size
+        # Mirrors release.yml; see the comment there for why 1 GiB.
+        run: |
+          mkdir -p .flatpak-builder/ccache
+          printf 'max_size = 1.0G\n' > .flatpak-builder/ccache/ccache.conf
+
+      - name: Add flathub and install the runtime
+        # Same resolution dance as release.yml: the manifest pins no branch for
+        # rust-stable, so it is read out of the SDK's own metadata rather than
+        # hardcoded a second time.
+        run: |
+          set -euo pipefail
+          flatpak remote-add --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install -y --noninteractive flathub \
+            org.gnome.Platform//50 org.gnome.Sdk//50
+          RUST_BRANCH=$(flatpak info --show-metadata org.gnome.Sdk//50 |
+            sed -n '/^\[Extension org\.freedesktop\.Sdk\.Extension\]$/,/^\[/{s/^version *= *//p}')
+          if [ -z "$RUST_BRANCH" ]; then
+            echo "Could not read the Freedesktop SDK extension branch from org.gnome.Sdk//50." >&2
+            exit 1
+          fi
+          echo "Resolved rust-stable branch to $RUST_BRANCH"
+          flatpak install -y --noninteractive flathub \
+            "org.freedesktop.Sdk.Extension.rust-stable//${RUST_BRANCH}"
+
+      - name: Build
+        # Byte-for-byte release.yml's build command minus --repo and --gpg-sign.
+        # Neither participates in flatpak-builder's per-module cache keys — they
+        # only affect the export that happens after every module is built — so
+        # the `build-opencascade` ref this produces is the one the release job
+        # restores. Verified locally by alternating the two invocations against
+        # one state dir: the second form still reported "Cache hit for
+        # opencascade, skipping build".
+        run: |
+          flatpak-builder --force-clean --disable-rofiles-fuse --ccache \
+            build-dir build-aux/io.github.SilkePilon.Scriber.yaml
+
+      - name: Assert OCCT is dynamically linked in the shipped binary
+        run: ./scripts/check-dynamic-occt.sh build-dir/files/bin/scriber
+
+      - name: Run the shipped binary
+        # The same assertions release.yml makes, and for the same reason they
+        # live inside the sandbox there: --run gives the build a private /tmp,
+        # so the output file does not exist out here.
+        run: |
+          set -euo pipefail
+          flatpak-builder --run build-dir \
+            build-aux/io.github.SilkePilon.Scriber.yaml \
+            sh -euc '
+              scriber smoke --output /tmp/release-check.step
+              head -c 13 /tmp/release-check.step | grep -q "ISO-10303-21;"
+              grep -q "CYLINDRICAL_SURFACE" /tmp/release-check.step
+            '
