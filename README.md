@@ -45,32 +45,51 @@ Expected fingerprint: 571D 6CC1 9961 D9CF 9EE7 9878 CFF5 3738 0F68 A138
 
 ## Usage
 
-There is no GUI, no modeling, and no document format yet. The only command is
-`smoke`: a diagnostic that proves the geometry pipeline — Rust, through our own
-C++ bridge, into OpenCASCADE and back out as STEP — works on your machine. It is
-not a feature.
+There is no GUI yet. A design is a text document that Scriber builds into
+geometry. Write one — Scriber's sandbox can only reach your Documents folder, so
+keep it there:
 
-Scriber's sandbox can only write to your Documents folder, so send the output
-there:
+```
+# ~/Documents/bracket.scr
+units mm
+
+param width = 60
+
+body plate = cuboid(width, 40, 12)
+body hole = cylinder(radius = 5, height = 12)
+body bracket = cut(plate, hole)
+
+export "bracket.step" from bracket
+```
+
+Then build it:
 
 ```sh
-flatpak run io.github.SilkePilon.Scriber smoke --output ~/Documents/smoke.step
+flatpak run io.github.SilkePilon.Scriber build ~/Documents/bracket.scr
 ```
 
-A working install prints one line:
+That writes `~/Documents/bracket.step`, a valid STEP model any CAD application
+can open. `.stl` works the same way, and is meshed on export.
 
-```
-wrote /home/<user>/Documents/smoke.step — volume 968.5841
-```
+The other commands:
 
-The solid it builds is a 10 x 10 x 10 block with a quarter of a radius-2,
-height-10 cylinder bored out of one corner, so 968.5841 is the analytic answer:
-`1000 - (pi * 2^2 * 10) / 4`. If that number comes back, the kernel is computing
-real geometry rather than reporting success it did not earn.
+| Command                      | What it does                                          |
+| ---------------------------- | ----------------------------------------------------- |
+| `build <doc>`                | Evaluate the document and run its `export` statements. |
+| `check <doc>`                | Report every error without building geometry.          |
+| `export <doc> -o <file>`     | Write one body where you say, ignoring the document's own `export` statements. |
+| `fmt <doc> [--check]`        | Reprint the document; `--check` fails if it differs.   |
+| `volume <doc> [--body NAME]` | Print a body's volume.                                 |
 
-The file it leaves behind is a valid STEP model — 428 entities, 19178 bytes,
-opening with `ISO-10303-21;` and closing with `END-ISO-10303-21;` — which you
-can load in any CAD application that reads STEP.
+A document writes only inside its own directory. An `export` pointing anywhere
+else is refused, naming the path it wanted, and runs only if you add
+`--allow-outside` — so opening a document someone sent you cannot be a way to
+have it write over your files. The path is never quietly redirected.
+
+Everything Scriber can know about a document — names, dimensions, units, export
+paths — is checked before anything is written, so a build that fails on a bad
+document leaves no geometry and no files behind, rather than a stale export that
+looks freshly written.
 
 ## Development
 

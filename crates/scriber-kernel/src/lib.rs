@@ -4,7 +4,12 @@
 
 mod error;
 
-use std::{fmt, marker::PhantomData, path::Path, rc::Rc};
+use std::{
+    fmt,
+    marker::PhantomData,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use cxx::UniquePtr;
 use scriber_occt::ffi;
@@ -63,30 +68,11 @@ impl Solid {
     /// Writes this solid to `path` as a STEP file.
     pub fn write_step(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let path = path.as_ref();
-        let as_str = path.to_str().ok_or_else(|| Error::StepWriteFailed {
-            path: path.to_path_buf(),
-            reason: "path is not valid UTF-8".to_owned(),
-        })?;
-
-        // A NUL is legal in a Rust str but terminates a C string. The shim
-        // rebuilds the path as std::string(data, size) and hands OCCT its
-        // .c_str(), so without this check OCCT silently writes to the prefix
-        // before the NUL and reports success — a caller asking for
-        // "report\0.step" gets a file called "report" and no indication that
-        // anything was substituted. Refusing is the only safe reading: we
-        // cannot know which of the two paths was meant.
-        if as_str.contains('\0') {
-            return Err(Error::StepWriteFailed {
-                path: path.to_path_buf(),
-                reason: "path contains an interior NUL byte".to_owned(),
-            });
-        }
+        let as_str = writable_path(path, step_write_failed)?;
 
         // Keep OCCT's own message — it is the only clue about why a write failed.
-        ffi::write_step(&self.inner, as_str).map_err(|exception| Error::StepWriteFailed {
-            path: path.to_path_buf(),
-            reason: exception.what().to_owned(),
-        })
+        ffi::write_step(&self.inner, as_str)
+            .map_err(|exception| step_write_failed(path.to_path_buf(), exception.what().to_owned()))
     }
 
     /// Writes this solid to `path` as ASCII STL.
@@ -95,26 +81,47 @@ impl Solid {
     /// an unmeshed shape produces a well-formed file containing zero facets.
     pub fn write_stl(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let path = path.as_ref();
-        let as_str = path.to_str().ok_or_else(|| Error::StepWriteFailed {
-            path: path.to_path_buf(),
-            reason: "path is not valid UTF-8".to_owned(),
-        })?;
+        let as_str = writable_path(path, stl_write_failed)?;
 
-        // Same hazard as `write_step`: a NUL is legal in a Rust str but
-        // terminates the C string OCCT receives, so without this check the
-        // kernel would write to the prefix and report success.
-        if as_str.contains('\0') {
-            return Err(Error::StepWriteFailed {
-                path: path.to_path_buf(),
-                reason: "path contains an interior NUL".to_owned(),
-            });
-        }
-
-        ffi::write_stl(&self.inner, as_str).map_err(|exception| Error::StepWriteFailed {
-            path: path.to_path_buf(),
-            reason: exception.what().to_owned(),
-        })
+        ffi::write_stl(&self.inner, as_str)
+            .map_err(|exception| stl_write_failed(path.to_path_buf(), exception.what().to_owned()))
     }
+}
+
+fn step_write_failed(path: PathBuf, reason: String) -> Error {
+    Error::StepWriteFailed { path, reason }
+}
+
+fn stl_write_failed(path: PathBuf, reason: String) -> Error {
+    Error::StlWriteFailed { path, reason }
+}
+
+/// Checks that `path` is something OCCT can be handed, and returns it as the
+/// `&str` the bridge takes.
+///
+/// `fail` is the caller's own error constructor, so a refusal names the format
+/// the caller asked for rather than whichever of the two writers this check was
+/// first written for.
+fn writable_path(path: &Path, fail: fn(PathBuf, String) -> Error) -> Result<&str, Error> {
+    let as_str = path
+        .to_str()
+        .ok_or_else(|| fail(path.to_path_buf(), "path is not valid UTF-8".to_owned()))?;
+
+    // A NUL is legal in a Rust str but terminates a C string. The shim
+    // rebuilds the path as std::string(data, size) and hands OCCT its
+    // .c_str(), so without this check OCCT silently writes to the prefix
+    // before the NUL and reports success — a caller asking for
+    // "report\0.step" gets a file called "report" and no indication that
+    // anything was substituted. Refusing is the only safe reading: we
+    // cannot know which of the two paths was meant.
+    if as_str.contains('\0') {
+        return Err(fail(
+            path.to_path_buf(),
+            "path contains an interior NUL".to_owned(),
+        ));
+    }
+
+    Ok(as_str)
 }
 
 /// Derive is impossible: `ffi::Shape` is opaque to Rust, so there is nothing to
@@ -303,11 +310,55 @@ mod tests {
     }
 
     #[test]
+    fn stl_export_rejects_a_path_containing_a_nul() {
+        let solid = Solid::cuboid(1.0, 1.0, 1.0).expect("cuboid builds");
+
+        let prefix =
+            std::env::temp_dir().join(format!("scriber_kernel_stl_nul_{}.stl", std::process::id()));
+        std::fs::remove_file(&prefix).ok();
+        assert!(!prefix.exists(), "could not clear {prefix:?}");
+
+        let requested = format!("{}\u{0}ignored.stl", prefix.display());
+        let err = solid
+            .write_stl(&requested)
+            .expect_err("a path with an interior NUL must be rejected");
+
+        assert!(
+            matches!(&err, Error::StlWriteFailed { reason, .. } if reason.contains("NUL")),
+            "got {err:?}"
+        );
+        assert!(
+            !prefix.exists(),
+            "write_stl truncated the path at the NUL and wrote to {prefix:?}"
+        );
+
+        std::fs::remove_file(&prefix).ok();
+    }
+
+    #[test]
     fn step_export_reports_an_unwritable_path() {
         let solid = Solid::cuboid(1.0, 1.0, 1.0).expect("cuboid builds");
         let err = solid
             .write_step("/nonexistent-directory/model.step")
             .expect_err("export must fail");
         assert!(matches!(err, Error::StepWriteFailed { .. }));
+    }
+
+    /// The message a user sees has to name the format they asked for. One
+    /// variant served both writers, so an STL failure read "failed to write
+    /// STEP file to model.stl" — an accurate path attached to the wrong noun.
+    #[test]
+    fn stl_export_reports_an_unwritable_path_as_an_stl_failure() {
+        let solid = Solid::cuboid(1.0, 1.0, 1.0).expect("cuboid builds");
+        let err = solid
+            .write_stl("/nonexistent-directory/model.stl")
+            .expect_err("export must fail");
+
+        assert!(matches!(err, Error::StlWriteFailed { .. }), "got {err:?}");
+
+        let message = err.to_string();
+        assert!(message.contains("STL file"), "{message}");
+        assert!(!message.contains("STEP"), "{message}");
+        assert!(message.contains("model.stl"), "{message}");
     }
 }

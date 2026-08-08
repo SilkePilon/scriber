@@ -22,6 +22,15 @@ pub enum Error {
     #[error("failed to write STEP file to {path}: {reason}")]
     StepWriteFailed { path: PathBuf, reason: String },
 
+    /// OCCT declined to write the STL file.
+    ///
+    /// Split from [`Error::StepWriteFailed`] rather than shared with it: one
+    /// variant covering both formats made an STL failure report "failed to
+    /// write STEP file to part.stl", which is a lie about the operation the
+    /// user asked for and sends them looking in the wrong place.
+    #[error("failed to write STL file to {path}: {reason}")]
+    StlWriteFailed { path: PathBuf, reason: String },
+
     /// A boolean operation produced no geometry.
     #[error("operation produced an empty result")]
     EmptyResult,

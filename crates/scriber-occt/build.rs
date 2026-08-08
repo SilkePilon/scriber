@@ -78,7 +78,7 @@ fn main() {
     // therefore reaches this crate's own test binary and nothing else. TWINS:
     // `crates/scriber-kernel/build.rs` and `crates/scriber-cli/build.rs` repeat
     // the prefix decision below for exactly that reason — without them
-    // `scriber`, scriber-kernel's test binary and the CLI smoke test come out
+    // `scriber`, scriber-kernel's test binary and the CLI's test binary come out
     // bare and die at startup under a custom OCCT_ROOT. Change the rule here and
     // you must change it in both twins.
     let needs_rpath = !LOADER_DEFAULT_PREFIXES

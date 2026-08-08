@@ -71,7 +71,7 @@ COMMANDS
   release   the build half of .github/workflows/release.yml: the full Flatpak
             build (compiles OCCT 8.0.1 from source — tens of minutes on the
             first run), the dynamic-OCCT gate on the shipped binary, and the
-            smoke run of that binary
+            build run of that binary
   all       test, then occt8, then release
   clean     delete the cache volumes and start over
 
@@ -388,7 +388,8 @@ echo "::: Run the shipped binary"
 flatpak-builder --run /fb/build-dir \\
   build-aux/io.github.SilkePilon.Scriber.yaml \\
   sh -euc '
-    scriber smoke --output /tmp/release-check.step
+    printf "body plate = cuboid(10, 10, 10)\nbody hole = cylinder(radius = 2, height = 10)\nbody part = cut(plate, hole)\nexport \"release-check.step\" from part\n" > /tmp/release-check.scr
+    scriber build /tmp/release-check.scr
     head -c 13 /tmp/release-check.step | grep -q "ISO-10303-21;"
     grep -q "CYLINDRICAL_SURFACE" /tmp/release-check.step
   '
