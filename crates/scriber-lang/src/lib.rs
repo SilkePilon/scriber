@@ -13,6 +13,8 @@
 // `deny` it cannot be lifted by an `allow` further down the tree.
 
 pub mod lexer;
+pub mod parser;
 pub mod syntax;
 
+pub use parser::{Parse, SyntaxError, parse};
 pub use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, print};
