@@ -21,10 +21,16 @@ const LOADER_DEFAULT_PREFIXES: &[&str] = &["/usr", "/usr/local", "/app"];
 ///   TKG2d, TKG3d, TKGeomBase,
 ///   TKBRep                       — ModelingData (GProp lives in TKGeomBase)
 ///   TKGeomAlgo, TKTopAlgo,
-///   TKPrim, TKBO, TKShHealing    — ModelingAlgorithms (BRepGProp is in
+///   TKPrim, TKBO, TKShHealing,
+///   TKMesh                       — ModelingAlgorithms (BRepGProp is in
 ///                                  TKTopAlgo, BRepPrimAPI in TKPrim,
-///                                  BRepAlgoAPI in TKBO)
-///   TKXSBase, TKDESTEP           — DataExchange (STEPControl is in TKDESTEP)
+///                                  BRepAlgoAPI in TKBO,
+///                                  BRepMesh_IncrementalMesh in TKMesh)
+///   TKXSBase, TKDESTEP,
+///   TKDESTL                      — DataExchange (STEPControl is in TKDESTEP,
+///                                  StlAPI_Writer in TKDESTL — note the name:
+///                                  OCCT 7.7 renamed the old TKSTL, and both
+///                                  7.9.x and 8.0.1 use TKDESTL)
 const OCCT_TOOLKITS: &[&str] = &[
     "TKernel",
     "TKMath",
@@ -37,8 +43,10 @@ const OCCT_TOOLKITS: &[&str] = &[
     "TKPrim",
     "TKBO",
     "TKShHealing",
+    "TKMesh",
     "TKXSBase",
     "TKDESTEP",
+    "TKDESTL",
 ];
 
 fn main() {
@@ -70,7 +78,7 @@ fn main() {
     // therefore reaches this crate's own test binary and nothing else. TWINS:
     // `crates/scriber-kernel/build.rs` and `crates/scriber-cli/build.rs` repeat
     // the prefix decision below for exactly that reason — without them
-    // `scriber`, scriber-kernel's test binary and the CLI smoke test come out
+    // `scriber`, scriber-kernel's test binary and the CLI's test binary come out
     // bare and die at startup under a custom OCCT_ROOT. Change the rule here and
     // you must change it in both twins.
     let needs_rpath = !LOADER_DEFAULT_PREFIXES

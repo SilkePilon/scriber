@@ -1,0 +1,15 @@
+# Every unit form the language accepts.
+units cm
+
+param a = 1        # a bare number reads as 1cm
+param b = 25.4mm
+param c = 1in
+param d = 2ft
+param e = 45deg
+param f = 0.5rad
+param g = a + b
+param h = max(a, b)
+param i = sqrt(16)
+param j = -(a + b) / 2
+
+body block = cuboid(a, b, c)

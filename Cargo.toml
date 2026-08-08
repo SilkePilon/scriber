@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/scriber-kernel", "crates/scriber-occt", "crates/scriber-cli"]
+members = ["crates/scriber-kernel", "crates/scriber-occt", "crates/scriber-cli", "crates/scriber-lang"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,11 @@ cxx = "1.0.130"
 cxx-build = "1.0.130"
 clap = { version = "4.5", features = ["derive"] }
 thiserror = "2.0"
+rowan = "0.17.0"
+logos = "0.16.1"
+codespan-reporting = "0.13.1"
+proptest = "1.11.0"
+insta = "1.48.0"
 
 [profile.release]
 lto = "thin"

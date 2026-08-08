@@ -7,7 +7,9 @@ Scriber does not use the network. There is no account, no sync, and no telemetry
 
 ## Status
 
-Milestone 0 — foundation. Not yet usable for modeling.
+Milestone 1 — the document language. A document can be built into a STEP or STL
+file from the command line. Usable for modeling only in that sense: the GUI is a
+later milestone.
 
 ## Install
 
@@ -45,32 +47,57 @@ Expected fingerprint: 571D 6CC1 9961 D9CF 9EE7 9878 CFF5 3738 0F68 A138
 
 ## Usage
 
-There is no GUI, no modeling, and no document format yet. The only command is
-`smoke`: a diagnostic that proves the geometry pipeline — Rust, through our own
-C++ bridge, into OpenCASCADE and back out as STEP — works on your machine. It is
-not a feature.
+Scriber models are written as documents. Scriber's sandbox can only reach your
+Documents folder, so keep them there. Create `~/Documents/plate.scr`:
 
-Scriber's sandbox can only write to your Documents folder, so send the output
-there:
+```
+units mm
+
+param width  = 60
+param height = 40
+param bore   = width / 12
+
+body plate = cuboid(width, height, 12)
+body hole  = cylinder(radius = bore, height = 12)
+body part  = cut(plate, hole)
+
+export "part.step" from part
+export "part.stl"  from part
+```
+
+Then build it:
 
 ```sh
-flatpak run io.github.SilkePilon.Scriber smoke --output ~/Documents/smoke.step
+flatpak run io.github.SilkePilon.Scriber build ~/Documents/plate.scr
 ```
 
-A working install prints one line:
+Both files appear next to the document. The STEP file is a B-rep model any CAD
+application can open; the STL is meshed on export. Other commands:
 
-```
-wrote /home/<user>/Documents/smoke.step — volume 968.5841
-```
+| Command | Does |
+| --- | --- |
+| `build <doc>` | evaluate and run the document's exports |
+| `check <doc>` | report errors without producing geometry |
+| `export <doc> -o <file> [--body <name>]` | export one body to a chosen path |
+| `fmt <doc> [--check]` | reprint a document |
+| `volume <doc> [--body <name>]` | print a body's volume |
 
-The solid it builds is a 10 x 10 x 10 block with a quarter of a radius-2,
-height-10 cylinder bored out of one corner, so 968.5841 is the analytic answer:
-`1000 - (pi * 2^2 * 10) / 4`. If that number comes back, the kernel is computing
-real geometry rather than reporting success it did not earn.
+A bare number means whatever the document's `units` line declared, and any
+literal may carry its own unit: `mm`, `cm`, `m`, `in`, `ft`, `deg` or `rad`.
+Lengths and angles do not mix — `1mm + 45deg` is refused rather than guessed at.
 
-The file it leaves behind is a valid STEP model — 428 entities, 19178 bytes,
-opening with `ISO-10303-21;` and closing with `END-ISO-10303-21;` — which you
-can load in any CAD application that reads STEP.
+A document writes only inside its own directory. An `export` pointing anywhere
+else is refused, naming the path it wanted, and runs only if you add
+`--allow-outside` — so opening a document someone sent you cannot be a way to
+have it write over your files. The path is never quietly redirected.
+
+Everything Scriber can know about a document — names, dimensions, units, export
+paths — is checked before anything is written, so a build that fails on a bad
+document leaves no geometry and no files behind, rather than a stale export that
+looks freshly written.
+
+Milestone 1 is the language. There is no GUI yet, and no sketches, fillets or
+selectors — those arrive in later milestones.
 
 ## Development
 

@@ -104,4 +104,6 @@ double volume(const Shape &shape);
 
 void write_step(const Shape &shape, rust::Str path);
 
+void write_stl(const Shape &shape, rust::Str path);
+
 }  // namespace scriber

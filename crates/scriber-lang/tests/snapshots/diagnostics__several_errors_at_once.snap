@@ -1,0 +1,21 @@
+---
+source: crates/scriber-lang/tests/diagnostics.rs
+expression: "rendered(\"param a = nope\\nparam b = alsonope\\nbody c = 5\\n\")"
+---
+error: `nope` is not declared — names must be declared before use
+  ┌─ doc.scr:1:11
+  │
+1 │ param a = nope
+  │           ^^^^
+
+error: `alsonope` is not declared — names must be declared before use
+  ┌─ doc.scr:2:11
+  │
+2 │ param b = alsonope
+  │           ^^^^^^^^
+
+error: a `body` must hold geometry — use `param`
+  ┌─ doc.scr:3:1
+  │
+3 │ body c = 5
+  │ ^^^^^^^^^^

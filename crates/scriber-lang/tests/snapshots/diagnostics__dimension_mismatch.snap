@@ -1,0 +1,9 @@
+---
+source: crates/scriber-lang/tests/diagnostics.rs
+expression: "rendered(\"param a = 1mm + 45deg\\n\")"
+---
+error: cannot add length and angle
+  ┌─ doc.scr:1:11
+  │
+1 │ param a = 1mm + 45deg
+  │           ^^^^^^^^^^^

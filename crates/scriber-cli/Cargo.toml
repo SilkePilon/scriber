@@ -13,3 +13,4 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 scriber-kernel = { path = "../scriber-kernel", version = "0.1.0" }
+scriber-lang = { path = "../scriber-lang", version = "0.1.0" }

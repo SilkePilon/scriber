@@ -263,7 +263,8 @@ jobs:
           flatpak-builder --run build-dir \
             build-aux/io.github.SilkePilon.Scriber.yaml \
             sh -euc '
-              scriber smoke --output /tmp/release-check.step
+              printf "body plate = cuboid(10, 10, 10)\nbody hole = cylinder(radius = 2, height = 10)\nbody part = cut(plate, hole)\nexport \"release-check.step\" from part\n" > /tmp/release-check.scr
+              scriber build /tmp/release-check.scr
               head -c 13 /tmp/release-check.step | grep -q "ISO-10303-21;"
               grep -q "CYLINDRICAL_SURFACE" /tmp/release-check.step
             '

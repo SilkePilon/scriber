@@ -1,0 +1,12 @@
+# A plate with a bore through it.
+units mm
+
+param width  = 60
+param height = 40
+param bore   = width / 12
+
+body plate = cuboid(width, height, 12)
+body hole  = cylinder(radius = bore, height = 12)
+body part  = cut(plate, hole)
+
+export "part.step" from part
