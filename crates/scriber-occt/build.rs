@@ -66,12 +66,13 @@ fn main() {
     //
     // SCOPE LIMIT, verified rather than assumed: `cargo:rustc-link-arg` applies
     // only to the targets of the package emitting it, and does NOT propagate to
-    // dependents the way rustc-link-search and rustc-link-lib do. Building the
-    // workspace with OCCT_ROOT=/tmp/occt-prefix puts DT_RPATH on this crate's
-    // own test binary and on nothing else — `scriber`, scriber-kernel's test
-    // binary and the smoke test all come out bare and still die at startup.
-    // Covering those needs an equivalent emission from a build script in the
-    // *binary* crate; there is no way to reach them from here.
+    // dependents the way rustc-link-search and rustc-link-lib do. What follows
+    // therefore reaches this crate's own test binary and nothing else. TWINS:
+    // `crates/scriber-kernel/build.rs` and `crates/scriber-cli/build.rs` repeat
+    // the prefix decision below for exactly that reason — without them
+    // `scriber`, scriber-kernel's test binary and the CLI smoke test come out
+    // bare and die at startup under a custom OCCT_ROOT. Change the rule here and
+    // you must change it in both twins.
     let needs_rpath = !LOADER_DEFAULT_PREFIXES
         .iter()
         .any(|prefix| root == Path::new(prefix));

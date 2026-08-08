@@ -1386,7 +1386,27 @@ modules:
     sources:
       - type: dir
         path: ..
+        # `type: dir` does not honour .gitignore, so exclude the build output
+        # and history explicitly — otherwise every build copies hundreds of
+        # megabytes of target/ and .git into the sandbox.
+        skip:
+          - target
+          - .git
+          - .superpowers
+          - build-dir
+          - .flatpak-builder
+          - repo
       - cargo-sources.json
+
+# Applied after every module is built, so OCCT's headers are still available
+# while scriber compiles against them and only the shipped tree is trimmed.
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - /share/opencascade/resources/DrawResources
+  - '*.a'
+  - '*.la'
 ```
 
 That checksum was verified against the published `V8_0_1` tarball on 2026-08-07. Confirm it still matches before the first build:
