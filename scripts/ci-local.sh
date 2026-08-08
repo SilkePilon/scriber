@@ -94,6 +94,11 @@ CACHING
   The container's target/ is deliberately separate from the host's; see the
   comment at the top of this script. `clean` removes the volumes.
 
+  This is the same caching CI now does, by different means: the workflows use
+  actions/cache over .flatpak-builder/{cache,ccache,downloads} and
+  Swatinem/rust-cache over ~/.cargo and target/, where this script uses Docker
+  volumes. Both run flatpak-builder with --ccache.
+
 EXAMPLES
   ./scripts/ci-local.sh test
   ./scripts/ci-local.sh occt8
@@ -351,6 +356,17 @@ echo "::: Build"
 # empty, which is also what the workflow does on a first release.
 mkdir -p pages
 
+# --ccache below matches both workflows. It needs no package on this side: the
+# compilers run inside the flatpak sandbox and org.gnome.Sdk//50 already ships
+# /usr/bin/ccache. The cache lands in the state dir, so the fbcache volume keeps
+# it between runs, which is what stops a config-opts tweak from costing a full
+# OCCT rebuild locally, exactly as in CI. The ceiling is the same 1 GiB the
+# workflows set, so the volume cannot quietly grow to ccache's 5 GiB default;
+# flatpak-builder writes no ccache.conf of its own, so this is the only place
+# to set it.
+mkdir -p /fb/.flatpak-builder/ccache
+printf 'max_size = 1.0G\n' > /fb/.flatpak-builder/ccache/ccache.conf
+
 # --state-dir is ours, not the workflow's: flatpak-builder refuses to run when
 # its state dir and its target dir are on different filesystems, and the cache
 # volume is by definition a different filesystem from the container's /work.
@@ -358,7 +374,7 @@ mkdir -p pages
 # .flatpak-builder (downloaded sources plus ccache) persist between runs.
 # In CI both sit in the checkout on one filesystem, so the flag is unnecessary
 # there and the workflow does not carry it.
-flatpak-builder --force-clean --disable-rofiles-fuse \\
+flatpak-builder --force-clean --disable-rofiles-fuse --ccache \\
   --state-dir=/fb/.flatpak-builder \\
   --repo=pages/repo "\${GPG_ARGS[@]}" \\
   /fb/build-dir build-aux/io.github.SilkePilon.Scriber.yaml
