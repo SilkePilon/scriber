@@ -286,8 +286,13 @@ Expected: PASS, 2 tests — `every_kind_round_trips_through_u16` and `printing_a
 
 - [ ] **Step 7: Confirm the no-unsafe and no-kernel constraints**
 
-Run: `grep -rn 'unsafe' crates/scriber-lang/src/ ; grep -n 'scriber-kernel\|scriber-occt' crates/scriber-lang/Cargo.toml`
-Expected: no output from either — exit status 1 from both greps
+Run: `cargo rustc -p scriber-lang --lib -- -D unsafe_code && grep -n 'scriber-kernel\|scriber-occt' crates/scriber-lang/Cargo.toml`
+Expected: the compile succeeds and the grep prints nothing.
+
+The lint is used rather than grepping for the word `unsafe`, because the source
+contains that word in comments explaining why the macro replaces rowan's
+`transmute`. A grep would fail on its own documentation; the lint checks the
+actual constraint.
 
 - [ ] **Step 8: Check formatting and lints**
 
@@ -3680,7 +3685,7 @@ git commit -m "test(lang): add the corpus and golden diagnostics"
 - [ ] `cargo test --workspace` passes.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 - [ ] The round-trip property passes 2000 generated cases, including malformed input.
-- [ ] `grep -rn 'unsafe' crates/scriber-lang/src/` returns nothing.
+- [ ] `cargo rustc -p scriber-lang --lib -- -D unsafe_code` compiles clean.
 - [ ] `scriber-lang` does not depend on `scriber-kernel` or `scriber-occt`.
 - [ ] `scriber build` produces a STEP file containing `CYLINDRICAL_SURFACE` and an STL with 12 facets for a cube.
 - [ ] A document with any error writes no files and exits non-zero.
