@@ -1,0 +1,11 @@
+---
+source: crates/scriber-lang/tests/diagnostics.rs
+expression: "rendered(\"param a = 1\\nparam a = 2\\n\")"
+---
+error: `a` is already declared
+  ┌─ doc.scr:2:7
+  │
+1 │ param a = 1
+  │       - first declared here
+2 │ param a = 2
+  │       ^

@@ -201,9 +201,14 @@ impl Quantity {
 
         let dimension = match (self.dimension, rhs.dimension) {
             (Scalar, other) | (other, Scalar) => other,
+            // Named in the language's own vocabulary — "scalar" is the word
+            // every other message uses — and phrased as the rule the user has
+            // to satisfy rather than as the reason the rule exists. "no
+            // operation takes a derived dimension" was true but told someone
+            // holding `1mm * 2mm` nothing about what to write instead.
             (a, b) => {
                 return Err(DimError::new(format!(
-                    "cannot multiply {} by {} — no operation takes a derived dimension",
+                    "cannot multiply {} by {} — one side must be a scalar",
                     a.name(),
                     b.name()
                 )));

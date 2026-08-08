@@ -1,0 +1,45 @@
+//! Snapshots of rendered errors, so message quality is version-controlled.
+//!
+//! Review a changed snapshot as carefully as changed code: `cargo insta review`.
+
+use scriber_lang::backend::RecordingBackend;
+use scriber_lang::diag::render;
+use scriber_lang::evaluate;
+
+fn rendered(source: &str) -> String {
+    let mut backend = RecordingBackend::default();
+    match evaluate(source, std::path::Path::new("/tmp"), &mut backend) {
+        Ok(_) => panic!("expected this document to fail"),
+        Err(diagnostics) => render(source, "doc.scr", &diagnostics),
+    }
+}
+
+#[test]
+fn undeclared_name() {
+    insta::assert_snapshot!(rendered("param a = missing\n"));
+}
+
+#[test]
+fn duplicate_declaration() {
+    insta::assert_snapshot!(rendered("param a = 1\nparam a = 2\n"));
+}
+
+#[test]
+fn dimension_mismatch() {
+    insta::assert_snapshot!(rendered("param a = 1mm + 45deg\n"));
+}
+
+#[test]
+fn multiplying_two_lengths() {
+    insta::assert_snapshot!(rendered("param a = 1mm * 2mm\n"));
+}
+
+#[test]
+fn wrong_arity() {
+    insta::assert_snapshot!(rendered("body b = cuboid(1, 2)\n"));
+}
+
+#[test]
+fn several_errors_at_once() {
+    insta::assert_snapshot!(rendered("param a = nope\nparam b = alsonope\nbody c = 5\n"));
+}

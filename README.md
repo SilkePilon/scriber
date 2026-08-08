@@ -7,7 +7,9 @@ Scriber does not use the network. There is no account, no sync, and no telemetry
 
 ## Status
 
-Milestone 0 — foundation. Not yet usable for modeling.
+Milestone 1 — the document language. A document can be built into a STEP or STL
+file from the command line. Usable for modeling only in that sense: the GUI is a
+later milestone.
 
 ## Install
 
@@ -45,41 +47,44 @@ Expected fingerprint: 571D 6CC1 9961 D9CF 9EE7 9878 CFF5 3738 0F68 A138
 
 ## Usage
 
-There is no GUI yet. A design is a text document that Scriber builds into
-geometry. Write one — Scriber's sandbox can only reach your Documents folder, so
-keep it there:
+Scriber models are written as documents. Scriber's sandbox can only reach your
+Documents folder, so keep them there. Create `~/Documents/plate.scr`:
 
 ```
-# ~/Documents/bracket.scr
 units mm
 
-param width = 60
+param width  = 60
+param height = 40
+param bore   = width / 12
 
-body plate = cuboid(width, 40, 12)
-body hole = cylinder(radius = 5, height = 12)
-body bracket = cut(plate, hole)
+body plate = cuboid(width, height, 12)
+body hole  = cylinder(radius = bore, height = 12)
+body part  = cut(plate, hole)
 
-export "bracket.step" from bracket
+export "part.step" from part
+export "part.stl"  from part
 ```
 
 Then build it:
 
 ```sh
-flatpak run io.github.SilkePilon.Scriber build ~/Documents/bracket.scr
+flatpak run io.github.SilkePilon.Scriber build ~/Documents/plate.scr
 ```
 
-That writes `~/Documents/bracket.step`, a valid STEP model any CAD application
-can open. `.stl` works the same way, and is meshed on export.
+Both files appear next to the document. The STEP file is a B-rep model any CAD
+application can open; the STL is meshed on export. Other commands:
 
-The other commands:
+| Command | Does |
+| --- | --- |
+| `build <doc>` | evaluate and run the document's exports |
+| `check <doc>` | report errors without producing geometry |
+| `export <doc> -o <file> [--body <name>]` | export one body to a chosen path |
+| `fmt <doc> [--check]` | reprint a document |
+| `volume <doc> [--body <name>]` | print a body's volume |
 
-| Command                      | What it does                                          |
-| ---------------------------- | ----------------------------------------------------- |
-| `build <doc>`                | Evaluate the document and run its `export` statements. |
-| `check <doc>`                | Report every error without building geometry.          |
-| `export <doc> -o <file>`     | Write one body where you say, ignoring the document's own `export` statements. |
-| `fmt <doc> [--check]`        | Reprint the document; `--check` fails if it differs.   |
-| `volume <doc> [--body NAME]` | Print a body's volume.                                 |
+A bare number means whatever the document's `units` line declared, and any
+literal may carry its own unit: `mm`, `cm`, `m`, `in`, `ft`, `deg` or `rad`.
+Lengths and angles do not mix — `1mm + 45deg` is refused rather than guessed at.
 
 A document writes only inside its own directory. An `export` pointing anywhere
 else is refused, naming the path it wanted, and runs only if you add
@@ -90,6 +95,9 @@ Everything Scriber can know about a document — names, dimensions, units, expor
 paths — is checked before anything is written, so a build that fails on a bad
 document leaves no geometry and no files behind, rather than a stale export that
 looks freshly written.
+
+Milestone 1 is the language. There is no GUI yet, and no sketches, fillets or
+selectors — those arrive in later milestones.
 
 ## Development
 

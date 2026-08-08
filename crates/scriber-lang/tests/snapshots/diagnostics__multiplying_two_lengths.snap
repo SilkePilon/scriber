@@ -1,0 +1,9 @@
+---
+source: crates/scriber-lang/tests/diagnostics.rs
+expression: "rendered(\"param a = 1mm * 2mm\\n\")"
+---
+error: cannot multiply length by length — one side must be a scalar
+  ┌─ doc.scr:1:11
+  │
+1 │ param a = 1mm * 2mm
+  │           ^^^^^^^^^

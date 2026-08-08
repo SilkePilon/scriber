@@ -336,12 +336,16 @@ impl Evaluator {
                 };
 
                 if args.len() != signature.params.len() {
+                    // The parameter names are listed because there is nowhere
+                    // else to look them up: a user told `cuboid` wants three
+                    // arguments still has to guess that the third is a depth.
                     self.error(
                         format!(
-                            "`{}` expects {} argument{}, found {}",
+                            "`{}` expects {} argument{} ({}), found {}",
                             callee.text(),
                             signature.params.len(),
                             if signature.params.len() == 1 { "" } else { "s" },
+                            signature.params.join(", "),
                             args.len()
                         ),
                         call.range(),

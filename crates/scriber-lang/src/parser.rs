@@ -142,12 +142,19 @@ impl Parser {
         self.depth += 1;
         let entry_depth = self.depth;
 
+        // The space between `=` and the expression belongs to the statement,
+        // not to the expression. Eaten before the checkpoint so that a
+        // diagnostic spanning this node starts at the first character the user
+        // actually wrote rather than at the blank in front of it.
+        self.eat_trivia();
         let checkpoint = self.builder.checkpoint();
         self.unary();
 
-        loop {
-            self.eat_trivia();
-            let Some(op) = self.current() else { break };
+        // The operator is peeked rather than consumed. Eating the trivia first
+        // would pull the line's trailing newline inside this node on the pass
+        // that then finds no operator, and every diagnostic spanning the node
+        // would draw a caret running on to the next line.
+        while let Some(op) = self.peek_non_trivia(0) {
             let Some(bp) = binding_power(op) else { break };
             if bp < min_bp {
                 break;
@@ -162,8 +169,9 @@ impl Parser {
             self.depth += 1;
             self.builder
                 .start_node_at(checkpoint, SyntaxKind::BinExpr.into());
+            // `bump` eats the trivia in front of the operator, which lands
+            // inside the wrapper where it belongs.
             self.bump();
-            self.eat_trivia();
             // Left-associative: the right operand needs strictly higher power.
             self.expr(bp + 1);
             self.builder.finish_node();
@@ -427,6 +435,23 @@ mod tests {
         let debug = format!("{:#?}", parse.syntax());
         assert!(parse.errors.is_empty(), "{:?}", parse.errors);
         assert!(debug.matches("BinExpr").count() == 2, "{debug}");
+    }
+
+    #[test]
+    fn a_node_ends_at_the_last_character_the_user_wrote() {
+        // Spans become diagnostics, so trailing trivia inside a node is not
+        // cosmetic: an expression that swallows its line's newline renders as a
+        // caret running down onto the next line, and the reader is left looking
+        // for a mistake on a line that has none.
+        let source = "param a = 1mm + 45deg\nparam b = 2\n";
+        let debug = format!("{:#?}", parse(source).syntax());
+
+        // `1mm + 45deg` is 10..21; 21 is the newline.
+        assert!(debug.contains("BinExpr@10..21"), "{debug}");
+        assert!(debug.contains("ParamDecl@0..21"), "{debug}");
+        // And the trivia is still in the tree, one level out, so nothing is
+        // lost — the round-trip below and in `tests/roundtrip.rs` prove it.
+        assert_eq!(print(&parse(source).syntax()), source);
     }
 
     #[test]

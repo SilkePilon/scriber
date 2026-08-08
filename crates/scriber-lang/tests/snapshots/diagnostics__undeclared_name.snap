@@ -1,0 +1,9 @@
+---
+source: crates/scriber-lang/tests/diagnostics.rs
+expression: "rendered(\"param a = missing\\n\")"
+---
+error: `missing` is not declared — names must be declared before use
+  ┌─ doc.scr:1:11
+  │
+1 │ param a = missing
+  │           ^^^^^^^
