@@ -12,6 +12,7 @@
 // here rather than a convention a later change can quietly break, and unlike
 // `deny` it cannot be lifted by an `allow` further down the tree.
 
+pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod syntax;
