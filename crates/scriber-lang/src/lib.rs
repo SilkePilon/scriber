@@ -16,6 +16,7 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod syntax;
+pub mod units;
 
 pub use parser::{Parse, SyntaxError, parse};
 pub use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, print};
