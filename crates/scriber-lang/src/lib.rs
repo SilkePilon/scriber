@@ -13,6 +13,7 @@
 // `deny` it cannot be lifted by an `allow` further down the tree.
 
 pub mod ast;
+pub mod diag;
 pub mod lexer;
 pub mod parser;
 pub mod syntax;
