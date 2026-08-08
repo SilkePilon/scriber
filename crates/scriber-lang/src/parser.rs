@@ -146,7 +146,16 @@ impl Parser {
         // not to the expression. Eaten before the checkpoint so that a
         // diagnostic spanning this node starts at the first character the user
         // actually wrote rather than at the blank in front of it.
-        self.eat_trivia();
+        //
+        // Peeked first, though: if nothing ahead can begin an expression there
+        // is no expression node to put the space into, and eating it anyway
+        // would leave it — and, at the end of a line, the newline — inside
+        // whatever node the caller is about to close. `body b = f(x =\n…` is
+        // the case that found this: every enclosing node ran on to the next
+        // statement. Same rule as `expect`.
+        if self.peek_non_trivia(0).is_some_and(starts_an_expression) {
+            self.eat_trivia();
+        }
         let checkpoint = self.builder.checkpoint();
         self.unary();
 
@@ -189,8 +198,10 @@ impl Parser {
         }
         self.depth += 1;
 
-        self.eat_trivia();
-        if self.current() == Some(SyntaxKind::Minus) {
+        // Peeked, not eaten, for the reason given in `expr`: `-` may not be
+        // there, and on that branch the trivia has nowhere to go.
+        if self.peek_non_trivia(0) == Some(SyntaxKind::Minus) {
+            self.eat_trivia();
             self.builder.start_node(SyntaxKind::UnaryExpr.into());
             self.bump();
             self.unary();
@@ -203,14 +214,18 @@ impl Parser {
     }
 
     fn primary(&mut self) {
-        self.eat_trivia();
-        match self.current() {
+        // The trivia in front of the expression belongs outside it, so it is
+        // eaten before the node is opened — but only on the branches that open
+        // one. The final arm has no node, so it leaves the trivia alone.
+        match self.peek_non_trivia(0) {
             Some(SyntaxKind::Number) => {
+                self.eat_trivia();
                 self.builder.start_node(SyntaxKind::Literal.into());
                 self.bump();
                 self.builder.finish_node();
             }
             Some(SyntaxKind::LParen) => {
+                self.eat_trivia();
                 self.builder.start_node(SyntaxKind::ParenExpr.into());
                 self.bump();
                 self.expr(0);
@@ -221,6 +236,7 @@ impl Parser {
                 self.builder.finish_node();
             }
             Some(SyntaxKind::Ident) => {
+                self.eat_trivia();
                 let checkpoint = self.builder.checkpoint();
                 self.bump();
                 if self.current() == Some(SyntaxKind::LParen) {
@@ -246,8 +262,14 @@ impl Parser {
             // Peeked, not eaten: on the pass that ends the list there is no
             // argument node to put the trivia in, and eating it here would
             // pull the line's trailing newline inside the call.
+            //
+            // A statement keyword ends the list too. The call is missing its
+            // `)` and the next line is a new statement; treating that keyword
+            // as the start of another argument would eat the newline in front
+            // of it and stretch the call over the statement below.
             match self.peek_non_trivia(0) {
                 None | Some(SyntaxKind::RParen) => break,
+                Some(kind) if starts_a_statement(kind) => break,
                 _ => {}
             }
 
@@ -286,9 +308,11 @@ impl Parser {
     fn error_statement(&mut self, message: &str) {
         let start = self.offset;
         self.builder.start_node(SyntaxKind::Error.into());
+        // `document` eats trivia before dispatching, so this first token is
+        // never trivia and the node always ends on something the user typed.
         self.bump_raw();
 
-        while !self.at_recovery_boundary() {
+        while !self.only_trivia_until_boundary() {
             self.bump_raw();
         }
 
@@ -304,9 +328,14 @@ impl Parser {
     fn recover(&mut self, message: &str) {
         let start = self.offset;
 
-        if !self.at_recovery_boundary() {
+        // Stops at the last non-trivia token rather than at the boundary
+        // itself: the blanks and comment at the end of a broken line are not
+        // text an error node should claim, and swallowing them would leave the
+        // node — and the diagnostic drawn from its range — ending past the last
+        // character the user wrote.
+        if !self.only_trivia_until_boundary() {
             self.builder.start_node(SyntaxKind::Error.into());
-            while !self.at_recovery_boundary() {
+            while !self.only_trivia_until_boundary() {
                 self.bump_raw();
             }
             self.builder.finish_node();
@@ -344,8 +373,8 @@ impl Parser {
     /// Where recovery stops: recovery takes the rest of the line, but never
     /// crosses a line break or a statement keyword, and never eats a `)` or
     /// `,` that an enclosing argument list is still waiting for.
-    fn at_recovery_boundary(&self) -> bool {
-        match self.tokens.get(self.pos) {
+    fn at_recovery_boundary(&self, index: usize) -> bool {
+        match self.tokens.get(index) {
             None => true,
             Some(token) => {
                 matches!(
@@ -358,6 +387,27 @@ impl Parser {
                         | SyntaxKind::Comma
                 ) || token.text.contains('\n')
             }
+        }
+    }
+
+    /// Whether everything between the cursor and the next recovery boundary is
+    /// trivia — so there is nothing left on this line worth claiming.
+    ///
+    /// This is where recovery actually stops. Stopping at the boundary instead
+    /// would let an error node end on the blanks or trailing comment before it,
+    /// and every node's range is a diagnostic's caret.
+    fn only_trivia_until_boundary(&self) -> bool {
+        let mut index = self.pos;
+        loop {
+            if self.at_recovery_boundary(index) {
+                return true;
+            }
+            // `at_recovery_boundary` already answered `None`, so this cannot be
+            // past the end.
+            if !self.tokens[index].kind.is_trivia() {
+                return false;
+            }
+            index += 1;
         }
     }
 
@@ -398,6 +448,26 @@ impl Parser {
         self.offset += TextSize::of(token.text.as_str());
         self.pos += 1;
     }
+}
+
+/// Whether a token can begin an expression.
+///
+/// Used to decide whether the trivia in front of the cursor has a node to land
+/// in. It is not a grammar rule — the parser still recovers on anything else —
+/// only the answer to "is there an expression here at all".
+fn starts_an_expression(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::Number | SyntaxKind::Ident | SyntaxKind::LParen | SyntaxKind::Minus
+    )
+}
+
+/// Whether a token begins a statement, and so ends whatever came before it.
+fn starts_a_statement(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::UnitsKw | SyntaxKind::ParamKw | SyntaxKind::BodyKw | SyntaxKind::ExportKw
+    )
 }
 
 fn binding_power(kind: SyntaxKind) -> Option<u8> {
@@ -489,6 +559,51 @@ mod tests {
         // `param x` is 0..7; 7 and 8 are the two newlines.
         assert!(debug.contains("ParamDecl@0..7"), "{debug}");
         assert_eq!(print(&parse(source).syntax()), source);
+    }
+
+    #[test]
+    fn a_missing_operand_does_not_stretch_the_statement_over_the_next_one() {
+        // Found by `tests/spans.rs`, not by reading. `expr` used to eat the
+        // trivia in front of the expression before knowing there was one, so a
+        // named argument with nothing after its `=` pulled the newline into the
+        // `Arg`, and every node out to `BodyDecl` ended on line 2.
+        let source = "body b = f(x =\nbody c = 2\n";
+        let debug = format!("{:#?}", parse(source).syntax());
+
+        // `body b = f(x =` is 0..14; 14 is the newline.
+        assert!(debug.contains("BodyDecl@0..14"), "{debug}");
+        assert!(debug.contains("Arg@11..14"), "{debug}");
+        assert_eq!(print(&parse(source).syntax()), source);
+    }
+
+    #[test]
+    fn an_unclosed_call_ends_at_its_last_argument_not_at_the_next_statement() {
+        // The argument loop used to take the next statement's keyword for
+        // another argument, eating the newline in front of it on the way.
+        let source = "body b = cuboid(1,\nparam y = 2\n";
+        let debug = format!("{:#?}", parse(source).syntax());
+
+        // `body b = cuboid(1,` is 0..18; 18 is the newline.
+        assert!(debug.contains("BodyDecl@0..18"), "{debug}");
+        assert!(debug.contains("ArgList@15..18"), "{debug}");
+        assert_eq!(print(&parse(source).syntax()), source);
+    }
+
+    #[test]
+    fn recovery_stops_at_the_last_character_rather_than_at_the_boundary() {
+        // Recovery takes the rest of the line — but the blanks at the end of a
+        // line are not part of what went wrong, and an error node claiming them
+        // draws a caret over empty space.
+        let debug = format!("{:#?}", parse("!!!  ").syntax());
+        assert!(debug.contains("Error@0..3"), "{debug}");
+
+        let debug = format!("{:#?}", parse("param x = 1 +   ").syntax());
+        assert!(debug.contains("ParamDecl@0..13"), "{debug}");
+        assert!(debug.contains("BinExpr@10..13"), "{debug}");
+
+        for source in ["!!!  ", "param x = 1 +   "] {
+            assert_eq!(print(&parse(source).syntax()), source);
+        }
     }
 
     #[test]

@@ -8,10 +8,11 @@ pub enum Error {
     ///
     /// OCCT does not reliably reject these — `make_cylinder(0.0, 1.0)` returns
     /// a valid-looking shape of zero volume, a negative height only fails
-    /// later during a volume query, and anything below OCCT's confusion
-    /// tolerance yields geometry the kernel treats as degenerate without
-    /// reporting an error. We validate at the boundary instead.
-    #[error("{name} must be finite and at least 1e-7, got {value}")]
+    /// later during a volume query, and anything at or below OCCT's confusion
+    /// tolerance yields geometry the kernel treats as degenerate, reporting
+    /// either nothing at all or a bare `Standard_DomainError` depending on
+    /// which primitive was asked. We validate at the boundary instead.
+    #[error("{name} must be finite and greater than 1e-7, got {value}")]
     InvalidDimension { name: &'static str, value: f64 },
 
     /// OCCT raised a failure. Carries the kernel's own message.

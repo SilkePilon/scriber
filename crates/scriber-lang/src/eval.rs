@@ -496,18 +496,32 @@ impl Evaluator {
         // Files are written only once every binding has succeeded. Exporting
         // and then failing would leave an artefact that looks fresh but is not,
         // which is worse than leaving none.
+        //
+        // KNOWN GAP, and it is not closed by the `break` below. Stopping at the
+        // first failure keeps a build from writing files *after* one, but the
+        // exports that already succeeded are still on disk: `export` hands the
+        // path straight to the backend, which writes in place. A document whose
+        // third export fails therefore leaves two fresh files and one stale or
+        // missing one — better than four, and still not "nothing". Closing it
+        // properly means writing to a temporary and renaming once every export
+        // has succeeded, which is a change to the `Backend` seam rather than to
+        // this loop, and is deliberately out of scope here.
         if errors.is_empty() {
             for (body_name, target, range) in exports {
-                match values.get(&body_name) {
-                    Some(Value::Body(body)) => {
-                        if let Err(message) = backend.export(body, &target) {
-                            errors.push(Diagnostic::error(message, range));
-                        }
-                    }
-                    _ => errors.push(Diagnostic::error(
-                        format!("`{body_name}` is not a body"),
-                        range,
-                    )),
+                let outcome = match values.get(&body_name) {
+                    Some(Value::Body(body)) => backend.export(body, &target),
+                    _ => Err(format!("`{body_name}` is not a body")),
+                };
+
+                if let Err(message) = outcome {
+                    errors.push(Diagnostic::error(message, range));
+                    // Stop at the first failure. Carrying on would write the
+                    // rest of the document's files for a build that has already
+                    // failed — adding to the mess rather than to what the user
+                    // learns, since the failure is reported either way and a
+                    // later export is no more likely to succeed than the one
+                    // that just did not.
+                    break;
                 }
             }
         }
@@ -619,14 +633,23 @@ impl Evaluator {
                 .map(|quantity| quantity.value)
                 .map_err(|error| Diagnostic::error(error.message, range))?;
 
-            // A 400-digit literal saturates to infinity and arithmetic can
-            // produce a NaN, and neither is a size anything can be built at.
-            // The check lives here, at the last point before the backend, so
-            // it holds for every backend rather than only the ones that check
-            // for themselves.
-            if !value.is_finite() {
+            // A 400-digit literal saturates to infinity, arithmetic can produce
+            // a NaN, and a zero or sub-tolerance extent is geometry no kernel
+            // can build. The check lives here, at the last point before the
+            // backend, so it holds for every backend rather than only the ones
+            // that check for themselves — which is what makes `check` and
+            // `build` give the same answer.
+            if !is_buildable_extent(value) {
+                // The parameter, not the function: `dx` says which of a
+                // cuboid's three arguments is wrong, and `cuboid` does not.
+                let param = signature_of(name)
+                    .and_then(|signature| signature.params.get(index).copied())
+                    .unwrap_or("length");
+
                 return Err(Diagnostic::error(
-                    format!("`{name}` needs a finite length, found {value}"),
+                    format!(
+                        "`{param}` must be finite and greater than {MIN_EXTENT:e}, found {value}"
+                    ),
                     range,
                 ));
             }
@@ -838,6 +861,31 @@ fn signature_of(name: &str) -> Option<Signature> {
     })
 }
 
+/// The tolerance, in millimetres, an extent must exceed.
+///
+/// TWIN of `scriber_kernel`'s `MIN_EXTENT`, which mirrors OCCT's
+/// `Precision::Confusion()`: at or below it the kernel treats two points as
+/// coincident and either returns a "solid" it considers degenerate or throws.
+/// The value is repeated here rather than imported because `scriber-lang` must
+/// not depend on the kernel — that dependency is what keeps this crate's tests
+/// free of a C++ toolchain, and it is not worth trading away for one float.
+///
+/// The two are therefore free to drift, so they are pinned together by
+/// `scriber-cli`, the one crate that links both:
+/// `the_languages_extent_rule_agrees_with_the_kernels` in `src/backend.rs`.
+pub const MIN_EXTENT: f64 = 1e-7;
+
+/// Whether `value` is an extent geometry can actually be built at.
+///
+/// Applied to every length argument before it reaches a [`Backend`], so a
+/// document that `check` accepts is one `build` can construct. Exposed so the
+/// agreement with the kernel can be asserted rather than assumed.
+///
+/// [`Backend`]: crate::backend::Backend
+pub fn is_buildable_extent(value: f64) -> bool {
+    value.is_finite() && value > MIN_EXTENT
+}
+
 /// STEP or STL, decided by extension.
 pub fn extension_format(path: &str) -> Option<&'static str> {
     let lowered = path.to_ascii_lowercase();
@@ -1006,6 +1054,160 @@ mod tests {
         // No literal can be a NaN, but arithmetic can produce one.
         let messages = errors("param n = sqrt(-1)\nbody b = cuboid(n, 1, 1)\n");
         assert!(messages[0].contains("finite"), "{messages:?}");
+    }
+
+    #[test]
+    fn rejects_an_extent_the_kernel_could_not_build() {
+        // THE POINT: this rule lives in front of every backend, not inside one.
+        // It used to live only in `scriber-kernel`, so `scriber check` — which
+        // evaluates against `RecordingBackend` — accepted `cuboid(0, 1, 1)` and
+        // exited 0 while `scriber build` on the same document failed. A command
+        // whose whole job is saying whether a document is good must not
+        // disagree with the command that builds it.
+        for (source, expected) in [
+            ("body b = cuboid(0, 1, 1)\n", "dx"),
+            ("body b = cuboid(1, 0, 1)\n", "dy"),
+            ("body b = cuboid(1, 1, 0)\n", "dz"),
+            ("body b = cuboid(-1, 1, 1)\n", "dx"),
+            // Positive and finite, but below OCCT's confusion tolerance, where
+            // the kernel returns geometry it considers degenerate.
+            ("body b = cuboid(0.00000001, 1, 1)\n", "dx"),
+            ("body b = cylinder(0, 10)\n", "radius"),
+            ("body b = cylinder(1, -5)\n", "height"),
+        ] {
+            let messages = errors(source);
+            assert!(
+                messages[0].contains(expected) && messages[0].contains("1e-7"),
+                "{source:?}: {messages:?}"
+            );
+        }
+
+        // The tolerance itself is not an extent — OCCT's box builder throws on
+        // it — but anything above it is.
+        assert!(run("body b = cuboid(0.0000001, 1, 1)\n").is_err());
+        assert!(run("body b = cuboid(0.0000002, 1, 1)\n").is_ok());
+        assert!(run("body b = cuboid(1, 1, 1)\n").is_ok());
+    }
+
+    #[test]
+    fn the_extent_rule_is_applied_in_document_units() {
+        // The rule is about the millimetres the backend is handed, not about
+        // the number in the source. `0.001` under `units m` is a metre-thousandth
+        // — 1mm — and must be accepted; the same figure in mm must not.
+        assert!(run("units m\nbody b = cuboid(0.001, 1, 1)\n").is_ok());
+        assert!(run("units mm\nbody b = cuboid(0.00000001, 1, 1)\n").is_err());
+    }
+
+    #[test]
+    fn is_buildable_extent_is_the_whole_rule() {
+        assert!(!is_buildable_extent(0.0));
+        assert!(!is_buildable_extent(-0.0));
+        assert!(!is_buildable_extent(-1.0));
+        assert!(!is_buildable_extent(f64::NAN));
+        assert!(!is_buildable_extent(f64::INFINITY));
+        assert!(!is_buildable_extent(f64::NEG_INFINITY));
+        assert!(!is_buildable_extent(MIN_EXTENT / 2.0));
+        // The tolerance itself is coincidence, not extent.
+        assert!(!is_buildable_extent(MIN_EXTENT));
+        assert!(is_buildable_extent(MIN_EXTENT * 1.001));
+        assert!(is_buildable_extent(1.0));
+    }
+
+    /// A backend whose `export` fails on the nth call, and records every call
+    /// it was asked for so that "no later export ran" is checkable rather than
+    /// inferred.
+    #[derive(Default)]
+    struct FailingExport {
+        attempts: Vec<String>,
+        fail_on: usize,
+    }
+
+    impl Backend for FailingExport {
+        type Body = usize;
+
+        fn cuboid(&mut self, _: f64, _: f64, _: f64) -> Result<usize, String> {
+            Ok(0)
+        }
+
+        fn cylinder(&mut self, _: f64, _: f64) -> Result<usize, String> {
+            Ok(0)
+        }
+
+        fn cut(&mut self, _: &usize, _: &usize) -> Result<usize, String> {
+            Ok(0)
+        }
+
+        fn export(&mut self, _: &usize, path: &Path) -> Result<(), String> {
+            self.attempts.push(path.display().to_string());
+            if self.attempts.len() == self.fail_on {
+                Err("disk is full".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn an_export_failure_stops_the_ones_after_it() {
+        // A real I/O error partway through is not a reason to keep writing. The
+        // loop used to run to the end, so a document with four exports whose
+        // second failed still produced the third and fourth — for a build that
+        // reports failure and whose files the user has no reason to trust.
+        let mut backend = FailingExport {
+            fail_on: 2,
+            ..Default::default()
+        };
+
+        let result = evaluate(
+            "body a = cuboid(1, 1, 1)\n\
+             export \"one.step\" from a\n\
+             export \"two.step\" from a\n\
+             export \"three.step\" from a\n\
+             export \"four.step\" from a\n",
+            Path::new("/tmp"),
+            &mut backend,
+        );
+
+        let messages: Vec<String> = result
+            .expect_err("the failing export must fail the build")
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        assert_eq!(messages, vec!["disk is full".to_string()]);
+
+        assert_eq!(
+            backend.attempts,
+            vec!["/tmp/one.step".to_string(), "/tmp/two.step".to_string()],
+            "kept exporting after a failure"
+        );
+    }
+
+    #[test]
+    fn a_successful_export_before_a_failure_is_still_on_disk() {
+        // Pinning the gap the `break` above does NOT close, so that closing it
+        // is a deliberate change with a failing test rather than an accident,
+        // and so nobody reads the guarantee as absolute. `export` writes in
+        // place: the first file is written, and it stays written. Only a
+        // temp-and-rename across the whole document would make a failed build
+        // leave literally nothing behind.
+        let mut backend = FailingExport {
+            fail_on: 2,
+            ..Default::default()
+        };
+
+        let result = evaluate(
+            "body a = cuboid(1, 1, 1)\n\
+             export \"one.step\" from a\n\
+             export \"two.step\" from a\n",
+            Path::new("/tmp"),
+            &mut backend,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            backend.attempts[0], "/tmp/one.step",
+            "the first export was still performed, and its file still exists"
+        );
     }
 
     #[test]

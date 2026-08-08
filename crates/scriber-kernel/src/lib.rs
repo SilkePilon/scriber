@@ -1,6 +1,18 @@
+#![forbid(unsafe_code)]
+
 //! Safe geometry API over the OCCT bridge.
 //!
 //! Nothing outside this crate should touch `scriber_occt` directly.
+
+// `unsafe` and C++ live only in scriber-occt, where the FFI boundary makes them
+// unavoidable. This crate is the safe API over that boundary — being safe is its
+// entire reason to exist — so `forbid` makes the rule a compile error rather
+// than a convention, and unlike `deny` it cannot be lifted by an `allow` further
+// down the tree. It is spelled per-crate here, matching scriber-lang and
+// scriber-cli, rather than via `[workspace.lints]`: a workspace lint table is
+// opt-in per package anyway (`lints.workspace = true`), so it would not have
+// caught this crate's omission either, and it would add a second place to look
+// when asking what a crate forbids.
 
 mod error;
 
@@ -132,21 +144,41 @@ impl fmt::Debug for Solid {
     }
 }
 
-/// Smallest extent we accept.
+/// The tolerance an extent must exceed.
 ///
-/// Matches OCCT's `Precision::Confusion()`. Below this the kernel treats two
-/// points as coincident, so it will happily build a "solid" it also considers
-/// degenerate — returning Ok with an essentially zero volume rather than an
-/// error. Rejecting here is what keeps that out of the API.
-const MIN_EXTENT: f64 = 1e-7;
+/// Matches OCCT's `Precision::Confusion()`. At or below this the kernel treats
+/// two points as coincident, so it will either build a "solid" it also
+/// considers degenerate — returning Ok with an essentially zero volume — or
+/// throw `Standard_DomainError` from deep inside a primitive builder. Rejecting
+/// here is what keeps both out of the API.
+pub const MIN_EXTENT: f64 = 1e-7;
 
-/// Rejects dimensions OCCT would accept but should not.
+/// Rejects dimensions OCCT would accept but should not, and dimensions it
+/// refuses in a way the caller should not have to read a C++ exception to
+/// understand.
+///
+/// The comparison is strict. `BRepPrimAPI_MakeBox` treats an extent of exactly
+/// `Precision::Confusion()` as degenerate and throws, while
+/// `BRepPrimAPI_MakeCylinder` accepts the same figure — so an inclusive bound
+/// let the boundary itself through to two different fates depending on the
+/// primitive, one of them an opaque `Standard_DomainError`. One rule, applied
+/// before OCCT sees the number, is the only way the API can promise the same
+/// answer for both.
 fn check_extent(name: &'static str, value: f64) -> Result<(), Error> {
-    if !value.is_finite() || value < MIN_EXTENT {
+    if !is_buildable_extent(value) {
         return Err(Error::InvalidDimension { name, value });
     }
 
     Ok(())
+}
+
+/// Whether `value` is an extent this kernel will build at.
+///
+/// Public so that `scriber-lang`, which must not depend on this crate and
+/// therefore keeps its own copy of the rule, can be tested against it rather
+/// than trusted to match it.
+pub fn is_buildable_extent(value: f64) -> bool {
+    value.is_finite() && value > MIN_EXTENT
 }
 
 /// Returns this crate's own semantic version, as declared in `Cargo.toml`.
@@ -211,6 +243,54 @@ mod tests {
             matches!(err, Error::InvalidDimension { name: "radius", .. }),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn the_tolerance_itself_is_rejected_by_both_primitives() {
+        // OCCT does not agree with itself here: at exactly
+        // `Precision::Confusion()`, `BRepPrimAPI_MakeCylinder` builds happily
+        // while `BRepPrimAPI_MakeBox` throws `Standard_DomainError` — a bare
+        // C++ exception surfacing as `Error::Kernel`, which tells a caller
+        // nothing about which dimension was at fault. `check_extent` is strict
+        // so that both report the same thing, and report it usefully.
+        for (result, expected) in [
+            (Solid::cuboid(MIN_EXTENT, 1.0, 1.0), "dx"),
+            (Solid::cylinder(MIN_EXTENT, 1.0), "radius"),
+            (Solid::cylinder(1.0, MIN_EXTENT), "height"),
+        ] {
+            let err = result.expect_err("the tolerance itself is not an extent");
+            assert!(
+                matches!(err, Error::InvalidDimension { name, .. } if name == expected),
+                "got {err:?}"
+            );
+        }
+
+        // And anything above it still builds, so the bound is a boundary and
+        // not a blanket refusal of small parts.
+        assert!(Solid::cuboid(MIN_EXTENT * 1.001, 1.0, 1.0).is_ok());
+    }
+
+    #[test]
+    fn the_extent_rule_is_the_predicate_it_exposes() {
+        // `is_buildable_extent` is what `scriber-cli` pins the language's copy
+        // of the rule against, so it has to be the rule the kernel actually
+        // applies rather than a second, agreeing-by-luck statement of it.
+        for value in [
+            0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            1e-12,
+            MIN_EXTENT,
+            MIN_EXTENT * 1.001,
+            1.0,
+        ] {
+            assert_eq!(
+                is_buildable_extent(value),
+                Solid::cuboid(value, 1.0, 1.0).is_ok(),
+                "disagreed about {value}"
+            );
+        }
     }
 
     #[test]

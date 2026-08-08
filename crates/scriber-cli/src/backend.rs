@@ -202,6 +202,52 @@ fn resolve(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// The one place the language's extent rule and the kernel's can be
+    /// compared, because this is the only crate that links both.
+    ///
+    /// `scriber-lang` deliberately does not depend on `scriber-kernel` — that
+    /// is what keeps its thousands of property-test cases free of a C++
+    /// toolchain — so `scriber_lang::eval::MIN_EXTENT` is a copy of the
+    /// kernel's, and copies drift. This is the test that notices. Without the
+    /// shared rule, `scriber check` accepted `cuboid(0, 1, 1)` and exited 0
+    /// while `scriber build` on the same document refused it; without this
+    /// test, they would be free to disagree again by one edit to either
+    /// constant.
+    #[test]
+    fn the_languages_extent_rule_agrees_with_the_kernels() {
+        use scriber_lang::eval::{MIN_EXTENT, is_buildable_extent};
+
+        for value in [
+            0.0,
+            -0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e-12,
+            MIN_EXTENT / 2.0,
+            // The tolerance itself, where OCCT's own primitives disagree with
+            // each other and where this test first earned its keep: the
+            // language accepted it and the kernel did not.
+            MIN_EXTENT,
+            MIN_EXTENT * 1.001,
+            MIN_EXTENT * 10.0,
+            1.0,
+            1000.0,
+        ] {
+            // Isolated in `dx`: the other two extents are plainly buildable, so
+            // whatever the kernel decides, it decided it about this value.
+            let kernel_accepts = Solid::cuboid(value, 1.0, 1.0).is_ok();
+
+            assert_eq!(
+                is_buildable_extent(value),
+                kernel_accepts,
+                "the language and the kernel disagree about {value}: \
+                 `scriber check` and `scriber build` would give different answers"
+            );
+        }
+    }
+
     /// `..` is not itself the thing being refused — leaving the directory is.
     #[test]
     fn resolve_applies_parent_components() {

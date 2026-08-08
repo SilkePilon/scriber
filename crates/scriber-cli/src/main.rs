@@ -38,6 +38,18 @@ enum Command {
     },
 
     /// Parse and type-check a document without producing geometry.
+    ///
+    /// Everything the language can decide without building is decided here, and
+    /// that includes every dimension the kernel would refuse: a zero, negative,
+    /// infinite or sub-tolerance extent fails `check` exactly as it fails
+    /// `build`.
+    ///
+    /// One class of failure is left, and it is left because no amount of
+    /// checking can reach it: a boolean operation that removes everything.
+    /// `cut(small, large)` type-checks, and whether it leaves any solid behind
+    /// is only knowable by asking the kernel to perform it. A document that
+    /// passes `check` and fails `build` with "operation produced an empty
+    /// result" is that case, and it is the only one.
     Check { document: PathBuf },
 
     /// Export one body, ignoring the document's own `export` statements.

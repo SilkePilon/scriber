@@ -88,6 +88,92 @@ fn a_document_with_errors_writes_no_files() {
     );
 }
 
+// --------------------------------------------------------------------------
+// `check` and `build` must agree.
+//
+// `check` exists to answer "is this document good?". It evaluates against
+// `RecordingBackend`, which builds nothing, so any rule that lived only in the
+// kernel was a rule `check` could not see — and a document it passed could
+// still fail to build. The extent rule therefore lives in `scriber-lang`, in
+// front of every backend. What is left over is documented in `check --help`.
+// --------------------------------------------------------------------------
+
+#[test]
+fn check_refuses_a_degenerate_dimension_just_as_build_does() {
+    // The exact reproduction from the review: `check` used to exit 0 on this
+    // while `build` on the same document failed in the kernel.
+    let doc = write_nested("degenerate", "body b = cuboid(0, 1, 1)\n");
+
+    let checked = scriber().arg("check").arg(&doc).output().expect("runs");
+    assert!(
+        !checked.status.success(),
+        "check passed a document build cannot build"
+    );
+
+    let built = scriber().arg("build").arg(&doc).output().expect("runs");
+    assert!(!built.status.success());
+
+    // Same message from both, so fixing what `check` reported is enough.
+    let from_check = String::from_utf8_lossy(&checked.stderr).into_owned();
+    let from_build = String::from_utf8_lossy(&built.stderr).into_owned();
+    assert_eq!(from_check, from_build, "check and build disagree");
+    assert!(from_check.contains("`dx`"), "{from_check}");
+    assert!(from_check.contains("1e-7"), "{from_check}");
+}
+
+#[test]
+fn build_reports_a_real_kernel_rejection_and_writes_no_file() {
+    // The one failure `check` cannot reach, end to end through the real kernel:
+    // cutting a large solid out of a small one type-checks and leaves nothing
+    // behind, which only OCCT can discover. `check` passing here is the gap
+    // `check --help` documents; `build` failing cleanly is what makes it
+    // survivable.
+    let doc = write_nested(
+        "empty_cut",
+        "body small = cuboid(1, 1, 1)\n\
+         body large = cuboid(10, 10, 10)\n\
+         body gone = cut(small, large)\n\
+         export \"gone.step\" from gone\n",
+    );
+
+    let checked = scriber().arg("check").arg(&doc).output().expect("runs");
+    assert!(
+        checked.status.success(),
+        "check now sees this — update `check --help`, which says it cannot: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+
+    let output = scriber().arg("build").arg(&doc).output().expect("runs");
+    assert!(
+        !output.status.success(),
+        "an empty boolean result built successfully"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The kernel's own words, carried through the Backend seam unchanged, and
+    // pointed at the statement that produced them.
+    assert!(stderr.contains("empty result"), "{stderr}");
+    assert!(stderr.contains("cut(small, large)"), "{stderr}");
+
+    assert!(
+        !doc.parent().unwrap().join("gone.step").exists(),
+        "wrote a file for a build that failed"
+    );
+}
+
+#[test]
+fn check_help_admits_the_one_thing_it_cannot_check() {
+    // The gap above is only survivable if a user is told about it, and `--help`
+    // is where they would look. Pinned so the text cannot quietly drift away
+    // from the behaviour.
+    let output = scriber().arg("check").arg("--help").output().expect("runs");
+    assert!(output.status.success());
+
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("empty result"), "{help}");
+    assert!(help.contains("cut("), "{help}");
+}
+
 #[test]
 fn fmt_check_accepts_an_unchanged_document() {
     let doc = write("fmt", "units mm\n\n# note\nparam x = 1\n");

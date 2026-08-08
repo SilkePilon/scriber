@@ -49,6 +49,14 @@ fn wrong_arity_in_an_unclosed_call() {
 }
 
 #[test]
+fn a_degenerate_extent() {
+    // Reported by the language, in front of every backend, so `check` says this
+    // and `build` says this. The parameter is named because `cuboid` alone does
+    // not tell the user which of the three arguments is the zero.
+    insta::assert_snapshot!(rendered("body b = cuboid(1, 0, 1)\n"));
+}
+
+#[test]
 fn several_errors_at_once() {
     insta::assert_snapshot!(rendered("param a = nope\nparam b = alsonope\nbody c = 5\n"));
 }

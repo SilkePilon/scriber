@@ -1,0 +1,10 @@
+---
+source: crates/scriber-lang/tests/diagnostics.rs
+assertion_line: 56
+expression: "rendered(\"body b = cuboid(1, 0, 1)\\n\")"
+---
+error: `dy` must be finite and greater than 1e-7, found 0
+  ┌─ doc.scr:1:10
+  │
+1 │ body b = cuboid(1, 0, 1)
+  │          ^^^^^^^^^^^^^^^
